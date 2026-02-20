@@ -12,5 +12,9 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "liquid-frames"),
+        .testTarget(
+            name: "liquid-framesTests",
+            dependencies: ["liquid-frames"]
+        ),
     ]
 )

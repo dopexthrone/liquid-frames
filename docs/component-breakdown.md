@@ -33,8 +33,17 @@
   - `branchBias`
   - `branchEnergy`
 - Coordinates timing and spring choreography for the branch sequence.
+- Records run telemetry and produces quality/adaptation feedback for iterative tuning.
 
-## 4) `PrototypeLayout` (Adaptive Layout Engine)
+## 4) `MotionIntelligence` (Core Motion Domain Layer)
+
+- Defines `MotionTuning`, validated ranges, and normalization.
+- Provides developer presets via `MotionPreset` (`Balanced`, `Responsive`, `Cinematic`).
+- Implements `GestureSignalEstimator` so gesture parsing is deterministic and testable.
+- Implements `MotionQualityEvaluator` for reliability scoring.
+- Implements `MotionAdaptiveEngine` for continuously self-improving profile adjustments.
+
+## 5) `PrototypeLayout` (Adaptive Layout Engine)
 
 - Converts window size + motion progress into:
   - pane sizes
@@ -43,26 +52,38 @@
   - opacity/scale transforms
 - Keeps the motion legible across iMac and MacBook-style aspect ratios.
 
-## 5) `LiquidPane` (Glass Card Primitive)
+## 6) `LiquidPane` (Glass Card Primitive)
 
 - Shared pane UI primitive for parent/children.
 - Uses material-backed surfaces, soft highlight gradients, and open-top stroke option.
 - Encodes readable information density without breaking visual hierarchy.
 
-## 6) `BirthConnectionLayer` (Liquid Branch Strokes)
+## 7) `BirthConnectionLayer` (Liquid Branch Strokes)
 
 - Draws two curved paths that emerge from the parent and connect to children.
 - Uses progressive trim and glow-stroke styling to sell “birth” continuity.
 - Deforms branch curvature and line energy in response to drag velocity and directional bias.
 
-## 7) `ControlDeck` (Interaction Controls)
+## 8) `ControlDeck` (Interaction Controls)
 
 - Primary action toggles between branch and reset.
 - Replay action re-runs the full sequence.
-- Surfaces current phase and live drag threshold progress.
+- Surfaces current phase, live drag threshold progress, and current quality state.
 
-## 8) `MotionTuningPanel` (Live Calibration)
+## 9) `MotionTuningPanel` (Live Calibration)
 
-- Exposes spring stiffness/damping and phase delay values.
-- Exposes gesture threshold and pull distance normalization.
+- Exposes presets, auto-adapt toggle, spring/delay values, and gesture shaping values.
 - Enables rapid calibration of "birth" feel during demo iteration.
+
+## 10) `MotionTelemetryPanel` (Reliability Feedback)
+
+- Displays quality report with warnings from the evaluator.
+- Displays latest run phase timing breakdown and recent-run summary rows.
+- Supports clearing run history to restart a calibration session.
+
+## 11) `Tests/liquid-framesTests/MotionIntelligenceTests.swift` (Verification)
+
+- Validates tuning range normalization.
+- Validates gesture signal response behavior.
+- Validates adaptive engine behavior for slow runs.
+- Validates quality evaluator instability detection.

@@ -8,24 +8,6 @@ enum BranchPhase: String {
     case branched
 }
 
-struct MotionTuning {
-    var splitStiffness: Double = 180
-    var splitDamping: Double = 22
-    var settleStiffness: Double = 145
-    var settleDamping: Double = 14
-
-    var preSplitDelay: Double = 0.32
-    var gestureCommitDelay: Double = 0.10
-    var preSettleDelay: Double = 0.56
-    var postSettleDelay: Double = 0.42
-
-    var gestureThreshold: CGFloat = 0.62
-    var pullDistance: CGFloat = 210
-    var velocityScale: CGFloat = 160
-    var velocityInfluence: CGFloat = 0.72
-    var biasInfluence: CGFloat = 0.45
-}
-
 @MainActor
 final class BranchMotionDirector: ObservableObject {
     @Published private(set) var phase: BranchPhase = .idle
@@ -37,9 +19,19 @@ final class BranchMotionDirector: ObservableObject {
     @Published private(set) var gestureVelocity: CGFloat = 0
     @Published private(set) var branchBias: CGFloat = 0
     @Published private(set) var branchEnergy: CGFloat = 0
-    @Published var tuning = MotionTuning()
+    @Published private(set) var tuning: MotionTuning = MotionPreset.balanced.tuning
+    @Published private(set) var runHistory: [MotionRunMetrics] = []
+    @Published private(set) var qualityReport = MotionQualityReport(
+        level: .healthy,
+        messages: ["Motion profile is within target reliability bounds."]
+    )
+    @Published var autoAdaptEnabled = true {
+        didSet { refreshQualityReport() }
+    }
 
     private var sequenceTask: Task<Void, Never>?
+    private var pendingPeaks = MotionPeaks()
+    private var inFlightRun: InFlightRun?
 
     var canBranch: Bool {
         phase == .idle
@@ -49,7 +41,11 @@ final class BranchMotionDirector: ObservableObject {
         phase == .branched
     }
 
-    func triggerBranch() {
+    var latestRun: MotionRunMetrics? {
+        runHistory.first
+    }
+
+    func triggerBranch(trigger: MotionTrigger = .button) {
         guard canBranch else { return }
         sequenceTask?.cancel()
         sequenceTask = nil
@@ -63,7 +59,8 @@ final class BranchMotionDirector: ObservableObject {
             gestureVelocity = max(gestureVelocity, 0.28)
         }
 
-        runSequence(preSplitDelay: tuning.preSplitDelay)
+        pendingPeaks.ingest(prep: prepProgress, velocity: gestureVelocity, bias: branchBias)
+        runSequence(preSplitDelay: tuning.preSplitDelay, trigger: trigger)
     }
 
     func updateGesture(value: DragGesture.Value) {
@@ -73,29 +70,20 @@ final class BranchMotionDirector: ObservableObject {
 
         phase = .gesturing
 
-        let translation = value.translation
-        let pull = max(0, -translation.height) + (abs(translation.width) * 0.25)
-        let normalized = min(1, pull / max(120, tuning.pullDistance))
-
-        let projectedDeltaX = value.predictedEndTranslation.width - translation.width
-        let projectedDeltaY = value.predictedEndTranslation.height - translation.height
-        let projectedDistance = hypot(projectedDeltaX, projectedDeltaY)
-        let velocity = min(1, projectedDistance / max(80, tuning.velocityScale))
-
-        let horizontalBias = translation.width / max(80, tuning.pullDistance * 0.8)
-        let projectedBias = projectedDeltaX / max(100, tuning.pullDistance)
-        let combinedBias = clamp(
-            horizontalBias + (projectedBias * tuning.biasInfluence),
-            min: -1,
-            max: 1
+        let output = GestureSignalEstimator.estimate(
+            input: GestureSignalInput(
+                translation: value.translation,
+                predictedEndTranslation: value.predictedEndTranslation,
+                tuning: tuning
+            )
         )
-        let energy = min(1, (normalized * 0.35) + (velocity * tuning.velocityInfluence))
 
-        prepProgress = normalized
-        glowPulse = min(1, (normalized * 1.1) + (velocity * 0.2))
-        gestureVelocity = velocity
-        branchBias = combinedBias
-        branchEnergy = energy
+        prepProgress = output.prepProgress
+        glowPulse = output.glowPulse
+        gestureVelocity = output.velocity
+        branchBias = output.bias
+        branchEnergy = output.energy
+        pendingPeaks.ingest(prep: output.prepProgress, velocity: output.velocity, bias: output.bias)
     }
 
     func endGesture() {
@@ -106,7 +94,8 @@ final class BranchMotionDirector: ObservableObject {
                 prepProgress = 1
                 glowPulse = 1
             }
-            runSequence(preSplitDelay: tuning.gestureCommitDelay)
+            pendingPeaks.ingest(prep: prepProgress, velocity: gestureVelocity, bias: branchBias)
+            runSequence(preSplitDelay: tuning.gestureCommitDelay, trigger: .gesture)
             return
         }
 
@@ -117,12 +106,33 @@ final class BranchMotionDirector: ObservableObject {
             branchBias = 0
             branchEnergy = 0
         }
+        pendingPeaks.reset()
         phase = .idle
+    }
+
+    func updateTuning(_ candidate: MotionTuning) {
+        tuning = candidate.normalized()
+        refreshQualityReport()
+    }
+
+    func applyPreset(_ preset: MotionPreset) {
+        updateTuning(preset.tuning)
+    }
+
+    func setAutoAdapt(_ enabled: Bool) {
+        autoAdaptEnabled = enabled
+    }
+
+    func clearRunHistory() {
+        runHistory.removeAll()
+        refreshQualityReport()
     }
 
     func reset() {
         sequenceTask?.cancel()
         sequenceTask = nil
+        inFlightRun = nil
+        pendingPeaks.reset()
 
         withAnimation(.spring(response: 0.55, dampingFraction: 0.88)) {
             prepProgress = 0
@@ -138,9 +148,10 @@ final class BranchMotionDirector: ObservableObject {
         phase = .idle
     }
 
-    private func runSequence(preSplitDelay: Double) {
+    private func runSequence(preSplitDelay: Double, trigger: MotionTrigger) {
         sequenceTask?.cancel()
         let tuningSnapshot = tuning
+        startRun(trigger: trigger)
 
         sequenceTask = Task {
             await Self.pause(seconds: preSplitDelay)
@@ -149,6 +160,7 @@ final class BranchMotionDirector: ObservableObject {
             await MainActor.run {
                 phase = .splitting
                 showsChildren = true
+                markSplitPhase()
                 withAnimation(.easeOut(duration: 0.2)) {
                     branchEnergy = max(branchEnergy, 0.28)
                 }
@@ -167,6 +179,7 @@ final class BranchMotionDirector: ObservableObject {
 
             await MainActor.run {
                 phase = .settling
+                markSettlePhase()
                 withAnimation(
                     .interpolatingSpring(
                         stiffness: tuningSnapshot.settleStiffness,
@@ -193,12 +206,84 @@ final class BranchMotionDirector: ObservableObject {
                     branchBias = 0
                     gestureVelocity = 0
                 }
+                finalizeRun()
             }
         }
     }
 
-    private func clamp(_ value: CGFloat, min: CGFloat, max: CGFloat) -> CGFloat {
-        Swift.max(min, Swift.min(max, value))
+    private func startRun(trigger: MotionTrigger) {
+        inFlightRun = InFlightRun(
+            trigger: trigger,
+            startedAt: Date(),
+            prepPeak: pendingPeaks.prep,
+            velocityPeak: pendingPeaks.velocity,
+            biasPeak: pendingPeaks.bias
+        )
+    }
+
+    private func markSplitPhase() {
+        mutateRun { run in
+            run.splitAt = Date()
+            run.prepPeak = max(run.prepPeak, prepProgress)
+            run.velocityPeak = max(run.velocityPeak, gestureVelocity)
+            run.biasPeak = maxByMagnitude(lhs: run.biasPeak, rhs: branchBias)
+        }
+    }
+
+    private func markSettlePhase() {
+        mutateRun { run in
+            run.settleAt = Date()
+            run.velocityPeak = max(run.velocityPeak, gestureVelocity)
+            run.biasPeak = maxByMagnitude(lhs: run.biasPeak, rhs: branchBias)
+        }
+    }
+
+    private func finalizeRun() {
+        guard let run = inFlightRun else { return }
+
+        let end = Date()
+        let splitAt = run.splitAt ?? end
+        let settleAt = run.settleAt ?? splitAt
+
+        let metrics = MotionRunMetrics(
+            timestamp: end,
+            trigger: run.trigger,
+            prepPeak: run.prepPeak,
+            velocityPeak: run.velocityPeak,
+            biasPeak: run.biasPeak,
+            phases: MotionPhaseDurations(
+                preSplit: max(0, splitAt.timeIntervalSince(run.startedAt)),
+                preSettle: max(0, settleAt.timeIntervalSince(splitAt)),
+                settleTail: max(0, end.timeIntervalSince(settleAt))
+            )
+        )
+
+        runHistory.insert(metrics, at: 0)
+        if runHistory.count > 40 {
+            runHistory.removeLast(runHistory.count - 40)
+        }
+
+        if autoAdaptEnabled {
+            tuning = MotionAdaptiveEngine.adapt(tuning: tuning, basedOn: metrics)
+        }
+
+        refreshQualityReport()
+        inFlightRun = nil
+        pendingPeaks.reset()
+    }
+
+    private func refreshQualityReport() {
+        qualityReport = MotionQualityEvaluator.evaluate(tuning: tuning, recentRuns: runHistory)
+    }
+
+    private func mutateRun(_ body: (inout InFlightRun) -> Void) {
+        guard var run = inFlightRun else { return }
+        body(&run)
+        inFlightRun = run
+    }
+
+    private func maxByMagnitude(lhs: CGFloat, rhs: CGFloat) -> CGFloat {
+        abs(rhs) > abs(lhs) ? rhs : lhs
     }
 
     private static func pause(seconds: Double) async {
@@ -210,4 +295,32 @@ final class BranchMotionDirector: ObservableObject {
     deinit {
         sequenceTask?.cancel()
     }
+}
+
+private struct MotionPeaks {
+    var prep: CGFloat = 0
+    var velocity: CGFloat = 0
+    var bias: CGFloat = 0
+
+    mutating func ingest(prep: CGFloat, velocity: CGFloat, bias: CGFloat) {
+        self.prep = max(self.prep, prep)
+        self.velocity = max(self.velocity, velocity)
+        self.bias = abs(bias) > abs(self.bias) ? bias : self.bias
+    }
+
+    mutating func reset() {
+        prep = 0
+        velocity = 0
+        bias = 0
+    }
+}
+
+private struct InFlightRun {
+    let trigger: MotionTrigger
+    let startedAt: Date
+    var splitAt: Date?
+    var settleAt: Date?
+    var prepPeak: CGFloat
+    var velocityPeak: CGFloat
+    var biasPeak: CGFloat
 }

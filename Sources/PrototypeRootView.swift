@@ -3,6 +3,7 @@ import SwiftUI
 struct PrototypeRootView: View {
     @StateObject private var motion = BranchMotionDirector()
     @State private var showsTuning = true
+    @State private var selectedPreset: MotionPreset = .balanced
 
     var body: some View {
         GeometryReader { proxy in
@@ -18,7 +19,11 @@ struct PrototypeRootView: View {
             )
             let tuningBinding = Binding<MotionTuning>(
                 get: { motion.tuning },
-                set: { motion.tuning = $0 }
+                set: { motion.updateTuning($0) }
+            )
+            let autoAdaptBinding = Binding<Bool>(
+                get: { motion.autoAdaptEnabled },
+                set: { motion.setAutoAdapt($0) }
             )
 
             ZStack {
@@ -91,18 +96,19 @@ struct PrototypeRootView: View {
                     prepProgress: motion.prepProgress,
                     gestureThreshold: motion.tuning.gestureThreshold,
                     velocity: motion.gestureVelocity,
+                    quality: motion.qualityReport.level,
                     onPrimary: {
                         if motion.isBranched {
                             motion.reset()
                         } else {
-                            motion.triggerBranch()
+                            motion.triggerBranch(trigger: .button)
                         }
                     },
                     onReplay: {
                         motion.reset()
                         Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 320_000_000)
-                            motion.triggerBranch()
+                            motion.triggerBranch(trigger: .replay)
                         }
                     }
                 )
@@ -124,13 +130,34 @@ struct PrototypeRootView: View {
                     .buttonStyle(.bordered)
 
                     if showsTuning {
-                        MotionTuningPanel(tuning: tuningBinding)
-                            .transition(
-                                .asymmetric(
-                                    insertion: .opacity.combined(with: .move(edge: .top)),
-                                    removal: .opacity.combined(with: .move(edge: .top))
-                                )
+                        MotionTuningPanel(
+                            tuning: tuningBinding,
+                            selectedPreset: $selectedPreset,
+                            autoAdaptEnabled: autoAdaptBinding,
+                            onApplyPreset: { preset in
+                                selectedPreset = preset
+                                motion.applyPreset(preset)
+                            }
+                        )
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .top)),
+                                removal: .opacity.combined(with: .move(edge: .top))
                             )
+                        )
+
+                        MotionTelemetryPanel(
+                            quality: motion.qualityReport,
+                            latestRun: motion.latestRun,
+                            runs: Array(motion.runHistory.prefix(6)),
+                            onClearRuns: { motion.clearRunHistory() }
+                        )
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .top)),
+                                removal: .opacity.combined(with: .move(edge: .top))
+                            )
+                        )
                     }
                 }
                 .padding(22)
@@ -479,6 +506,7 @@ private struct ControlDeck: View {
     let prepProgress: CGFloat
     let gestureThreshold: CGFloat
     let velocity: CGFloat
+    let quality: MotionQualityLevel
     let onPrimary: () -> Void
     let onReplay: () -> Void
 
@@ -523,6 +551,18 @@ private struct ControlDeck: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
                 .background(.white.opacity(0.1), in: Capsule())
+
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(quality.color)
+                    .frame(width: 8, height: 8)
+                Text(quality.label)
+                    .font(.subheadline.monospaced().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.88))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(.white.opacity(0.1), in: Capsule())
         }
         .padding(10)
         .background(.ultraThinMaterial, in: Capsule())
@@ -531,101 +571,156 @@ private struct ControlDeck: View {
 
 private struct MotionTuningPanel: View {
     @Binding var tuning: MotionTuning
+    @Binding var selectedPreset: MotionPreset
+    @Binding var autoAdaptEnabled: Bool
+    let onApplyPreset: (MotionPreset) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Motion Tuning")
-                .font(.headline.weight(.regular))
-                .foregroundStyle(.white.opacity(0.96))
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Motion Tuning")
+                        .font(.headline.weight(.regular))
+                        .foregroundStyle(.white.opacity(0.96))
+                    Text("Profile presets + adaptive controls + parameter sliders.")
+                        .font(.footnote.weight(.regular))
+                        .foregroundStyle(.white.opacity(0.74))
+                }
+                Spacer(minLength: 0)
+                Toggle("", isOn: $autoAdaptEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
 
-            Text("Drag upward on parent pane to trigger branch birth.")
-                .font(.footnote.weight(.regular))
-                .foregroundStyle(.white.opacity(0.76))
+            HStack(spacing: 8) {
+                Picker("Preset", selection: $selectedPreset) {
+                    ForEach(MotionPreset.allCases) { preset in
+                        Text(preset.label).tag(preset)
+                    }
+                }
+                .pickerStyle(.segmented)
 
-            sliderRow(
-                "Split Stiffness",
-                value: $tuning.splitStiffness,
-                range: 120...280,
-                fractionDigits: 0
-            )
-            sliderRow(
-                "Split Damping",
-                value: $tuning.splitDamping,
-                range: 10...34,
-                fractionDigits: 0
-            )
-            sliderRow(
-                "Settle Stiffness",
-                value: $tuning.settleStiffness,
-                range: 90...230,
-                fractionDigits: 0
-            )
-            sliderRow(
-                "Settle Damping",
-                value: $tuning.settleDamping,
-                range: 8...28,
-                fractionDigits: 0
-            )
-            sliderRow(
-                "Pre-Split Delay",
-                value: $tuning.preSplitDelay,
-                range: 0...0.8,
-                fractionDigits: 2
-            )
-            sliderRow(
-                "Pre-Settle Delay",
-                value: $tuning.preSettleDelay,
-                range: 0.2...1.2,
-                fractionDigits: 2
-            )
-            sliderRow(
-                "Gesture Threshold",
-                value: Binding<Double>(
-                    get: { Double(tuning.gestureThreshold) },
-                    set: { tuning.gestureThreshold = CGFloat($0) }
-                ),
-                range: 0.4...0.9,
-                fractionDigits: 2
-            )
-            sliderRow(
-                "Pull Distance",
-                value: Binding<Double>(
-                    get: { Double(tuning.pullDistance) },
-                    set: { tuning.pullDistance = CGFloat($0) }
-                ),
-                range: 120...320,
-                fractionDigits: 0
-            )
-            sliderRow(
-                "Velocity Scale",
-                value: Binding<Double>(
-                    get: { Double(tuning.velocityScale) },
-                    set: { tuning.velocityScale = CGFloat($0) }
-                ),
-                range: 80...300,
-                fractionDigits: 0
-            )
-            sliderRow(
-                "Velocity Influence",
-                value: Binding<Double>(
-                    get: { Double(tuning.velocityInfluence) },
-                    set: { tuning.velocityInfluence = CGFloat($0) }
-                ),
-                range: 0.2...1.2,
-                fractionDigits: 2
-            )
-            sliderRow(
-                "Bias Influence",
-                value: Binding<Double>(
-                    get: { Double(tuning.biasInfluence) },
-                    set: { tuning.biasInfluence = CGFloat($0) }
-                ),
-                range: 0.1...1,
-                fractionDigits: 2
-            )
+                Button("Apply") {
+                    onApplyPreset(selectedPreset)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            HStack(spacing: 8) {
+                Text(autoAdaptEnabled ? "Auto-adapt: On" : "Auto-adapt: Off")
+                    .font(.footnote.monospaced().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.11), in: Capsule())
+
+                Button("Normalize") {
+                    tuning = tuning.normalized()
+                }
+                .buttonStyle(.bordered)
+            }
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 10) {
+                    sliderRow(
+                        "Split Stiffness",
+                        value: $tuning.splitStiffness,
+                        range: MotionTuning.splitStiffnessRange,
+                        fractionDigits: 0
+                    )
+                    sliderRow(
+                        "Split Damping",
+                        value: $tuning.splitDamping,
+                        range: MotionTuning.splitDampingRange,
+                        fractionDigits: 0
+                    )
+                    sliderRow(
+                        "Settle Stiffness",
+                        value: $tuning.settleStiffness,
+                        range: MotionTuning.settleStiffnessRange,
+                        fractionDigits: 0
+                    )
+                    sliderRow(
+                        "Settle Damping",
+                        value: $tuning.settleDamping,
+                        range: MotionTuning.settleDampingRange,
+                        fractionDigits: 0
+                    )
+                    sliderRow(
+                        "Pre-Split Delay",
+                        value: $tuning.preSplitDelay,
+                        range: MotionTuning.preSplitDelayRange,
+                        fractionDigits: 2
+                    )
+                    sliderRow(
+                        "Gesture Commit Delay",
+                        value: $tuning.gestureCommitDelay,
+                        range: MotionTuning.gestureCommitDelayRange,
+                        fractionDigits: 2
+                    )
+                    sliderRow(
+                        "Pre-Settle Delay",
+                        value: $tuning.preSettleDelay,
+                        range: MotionTuning.preSettleDelayRange,
+                        fractionDigits: 2
+                    )
+                    sliderRow(
+                        "Post-Settle Delay",
+                        value: $tuning.postSettleDelay,
+                        range: MotionTuning.postSettleDelayRange,
+                        fractionDigits: 2
+                    )
+                    sliderRow(
+                        "Gesture Threshold",
+                        value: Binding<Double>(
+                            get: { Double(tuning.gestureThreshold) },
+                            set: { tuning.gestureThreshold = CGFloat($0) }
+                        ),
+                        range: asDoubleRange(MotionTuning.gestureThresholdRange),
+                        fractionDigits: 2
+                    )
+                    sliderRow(
+                        "Pull Distance",
+                        value: Binding<Double>(
+                            get: { Double(tuning.pullDistance) },
+                            set: { tuning.pullDistance = CGFloat($0) }
+                        ),
+                        range: asDoubleRange(MotionTuning.pullDistanceRange),
+                        fractionDigits: 0
+                    )
+                    sliderRow(
+                        "Velocity Scale",
+                        value: Binding<Double>(
+                            get: { Double(tuning.velocityScale) },
+                            set: { tuning.velocityScale = CGFloat($0) }
+                        ),
+                        range: asDoubleRange(MotionTuning.velocityScaleRange),
+                        fractionDigits: 0
+                    )
+                    sliderRow(
+                        "Velocity Influence",
+                        value: Binding<Double>(
+                            get: { Double(tuning.velocityInfluence) },
+                            set: { tuning.velocityInfluence = CGFloat($0) }
+                        ),
+                        range: asDoubleRange(MotionTuning.velocityInfluenceRange),
+                        fractionDigits: 2
+                    )
+                    sliderRow(
+                        "Bias Influence",
+                        value: Binding<Double>(
+                            get: { Double(tuning.biasInfluence) },
+                            set: { tuning.biasInfluence = CGFloat($0) }
+                        ),
+                        range: asDoubleRange(MotionTuning.biasInfluenceRange),
+                        fractionDigits: 2
+                    )
+                }
+            }
+            .frame(maxHeight: 300)
         }
         .padding(16)
-        .frame(width: 312)
+        .frame(width: 360)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
@@ -647,6 +742,143 @@ private struct MotionTuningPanel: View {
             }
             Slider(value: value, in: range)
                 .tint(.white.opacity(0.9))
+        }
+    }
+
+    private func asDoubleRange(_ range: ClosedRange<CGFloat>) -> ClosedRange<Double> {
+        Double(range.lowerBound)...Double(range.upperBound)
+    }
+}
+
+private struct MotionTelemetryPanel: View {
+    let quality: MotionQualityReport
+    let latestRun: MotionRunMetrics?
+    let runs: [MotionRunMetrics]
+    let onClearRuns: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(quality.level.color)
+                        .frame(width: 8, height: 8)
+                    Text("Quality: \(quality.level.label)")
+                        .font(.headline.monospaced().weight(.regular))
+                        .foregroundStyle(.white.opacity(0.94))
+                }
+                Spacer(minLength: 0)
+                Button("Clear History", action: onClearRuns)
+                    .buttonStyle(.bordered)
+            }
+
+            ForEach(quality.messages, id: \.self) { message in
+                Text(message)
+                    .font(.footnote.weight(.regular))
+                    .foregroundStyle(.white.opacity(0.78))
+            }
+
+            if let latestRun {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Latest Run")
+                        .font(.subheadline.weight(.regular))
+                        .foregroundStyle(.white.opacity(0.92))
+                    Text(
+                        "\(latestRun.trigger.rawValue.uppercased())  \(latestRun.totalDuration, format: .number.precision(.fractionLength(2)))s"
+                    )
+                    .font(.footnote.monospaced().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.88))
+                    PhaseTimingBar(phases: latestRun.phases)
+                }
+            }
+
+            if !runs.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Recent Runs")
+                        .font(.subheadline.weight(.regular))
+                        .foregroundStyle(.white.opacity(0.92))
+                    ForEach(runs) { run in
+                        HStack {
+                            Text(run.trigger.rawValue.uppercased())
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.7))
+                                .frame(width: 62, alignment: .leading)
+                            Text(run.totalDuration, format: .number.precision(.fractionLength(2)))
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.88))
+                            Text("s")
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.7))
+                            Spacer(minLength: 0)
+                            Text("v\(Int(run.velocityPeak * 100))")
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.72))
+                            Text("b\(Int(abs(run.biasPeak) * 100))")
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.72))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+private struct PhaseTimingBar: View {
+    let phases: MotionPhaseDurations
+
+    var body: some View {
+        let total = max(0.01, phases.total)
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let preSplitWidth = max(2, width * CGFloat(phases.preSplit / total))
+            let preSettleWidth = max(2, width * CGFloat(phases.preSettle / total))
+            let settleWidth = max(2, width * CGFloat(phases.settleTail / total))
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.white.opacity(0.26))
+                HStack(spacing: 0) {
+                    Rectangle()
+                        .fill(Color.cyan.opacity(0.88))
+                        .frame(width: preSplitWidth)
+                    Rectangle()
+                        .fill(Color.mint.opacity(0.86))
+                        .frame(width: preSettleWidth)
+                    Rectangle()
+                        .fill(Color.blue.opacity(0.84))
+                        .frame(width: settleWidth)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+        }
+        .frame(height: 10)
+    }
+}
+
+private extension MotionQualityLevel {
+    var color: Color {
+        switch self {
+        case .healthy:
+            .mint
+        case .caution:
+            .orange
+        case .unstable:
+            .red
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .healthy:
+            "Healthy"
+        case .caution:
+            "Caution"
+        case .unstable:
+            "Unstable"
         }
     }
 }
