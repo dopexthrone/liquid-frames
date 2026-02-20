@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PrototypeRootView: View {
     @StateObject private var motion = BranchMotionDirector()
+    @State private var showsTuning = true
 
     var body: some View {
         GeometryReader { proxy in
@@ -10,6 +11,10 @@ struct PrototypeRootView: View {
                 prepProgress: motion.prepProgress,
                 splitProgress: motion.splitProgress,
                 settleProgress: motion.settleProgress
+            )
+            let tuningBinding = Binding<MotionTuning>(
+                get: { motion.tuning },
+                set: { motion.tuning = $0 }
             )
 
             ZStack {
@@ -34,6 +39,16 @@ struct PrototypeRootView: View {
                 .position(layout.parentCenter)
                 .scaleEffect(layout.parentScale)
                 .opacity(layout.parentOpacity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 2)
+                        .onChanged { value in
+                            motion.updateGesture(translation: value.translation)
+                        }
+                        .onEnded { _ in
+                            motion.endGesture()
+                        }
+                )
 
                 if motion.showsChildren || motion.splitProgress > 0 {
                     LiquidPane(
@@ -65,6 +80,8 @@ struct PrototypeRootView: View {
 
                 ControlDeck(
                     phase: motion.phase,
+                    prepProgress: motion.prepProgress,
+                    gestureThreshold: motion.tuning.gestureThreshold,
                     onPrimary: {
                         if motion.isBranched {
                             motion.reset()
@@ -82,6 +99,33 @@ struct PrototypeRootView: View {
                 )
                 .padding(28)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+
+                VStack(alignment: .trailing, spacing: 10) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showsTuning.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showsTuning ? "Hide Motion Tuning" : "Show Motion Tuning",
+                            systemImage: "slider.horizontal.3"
+                        )
+                        .font(.subheadline.weight(.regular))
+                    }
+                    .buttonStyle(.bordered)
+
+                    if showsTuning {
+                        MotionTuningPanel(tuning: tuningBinding)
+                            .transition(
+                                .asymmetric(
+                                    insertion: .opacity.combined(with: .move(edge: .top)),
+                                    removal: .opacity.combined(with: .move(edge: .top))
+                                )
+                            )
+                    }
+                }
+                .padding(22)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -343,6 +387,8 @@ private struct LiquidPane: View {
 
 private struct ControlDeck: View {
     let phase: BranchPhase
+    let prepProgress: CGFloat
+    let gestureThreshold: CGFloat
     let onPrimary: () -> Void
     let onReplay: () -> Void
 
@@ -373,8 +419,110 @@ private struct ControlDeck: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
                 .background(.white.opacity(0.1), in: Capsule())
+
+            Text("Drag \u{2191} \(Int(prepProgress * 100))% / \(Int(gestureThreshold * 100))%")
+                .font(.subheadline.monospaced().weight(.regular))
+                .foregroundStyle(.white.opacity(0.82))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(.white.opacity(0.1), in: Capsule())
         }
         .padding(10)
         .background(.ultraThinMaterial, in: Capsule())
+    }
+}
+
+private struct MotionTuningPanel: View {
+    @Binding var tuning: MotionTuning
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Motion Tuning")
+                .font(.headline.weight(.regular))
+                .foregroundStyle(.white.opacity(0.96))
+
+            Text("Drag upward on parent pane to trigger branch birth.")
+                .font(.footnote.weight(.regular))
+                .foregroundStyle(.white.opacity(0.76))
+
+            sliderRow(
+                "Split Stiffness",
+                value: $tuning.splitStiffness,
+                range: 120...280,
+                fractionDigits: 0
+            )
+            sliderRow(
+                "Split Damping",
+                value: $tuning.splitDamping,
+                range: 10...34,
+                fractionDigits: 0
+            )
+            sliderRow(
+                "Settle Stiffness",
+                value: $tuning.settleStiffness,
+                range: 90...230,
+                fractionDigits: 0
+            )
+            sliderRow(
+                "Settle Damping",
+                value: $tuning.settleDamping,
+                range: 8...28,
+                fractionDigits: 0
+            )
+            sliderRow(
+                "Pre-Split Delay",
+                value: $tuning.preSplitDelay,
+                range: 0...0.8,
+                fractionDigits: 2
+            )
+            sliderRow(
+                "Pre-Settle Delay",
+                value: $tuning.preSettleDelay,
+                range: 0.2...1.2,
+                fractionDigits: 2
+            )
+            sliderRow(
+                "Gesture Threshold",
+                value: Binding<Double>(
+                    get: { Double(tuning.gestureThreshold) },
+                    set: { tuning.gestureThreshold = CGFloat($0) }
+                ),
+                range: 0.4...0.9,
+                fractionDigits: 2
+            )
+            sliderRow(
+                "Pull Distance",
+                value: Binding<Double>(
+                    get: { Double(tuning.pullDistance) },
+                    set: { tuning.pullDistance = CGFloat($0) }
+                ),
+                range: 120...320,
+                fractionDigits: 0
+            )
+        }
+        .padding(16)
+        .frame(width: 312)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func sliderRow(
+        _ label: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        fractionDigits: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(label)
+                    .font(.footnote.weight(.regular))
+                    .foregroundStyle(.white.opacity(0.84))
+                Spacer(minLength: 0)
+                Text(value.wrappedValue, format: .number.precision(.fractionLength(fractionDigits)))
+                    .font(.footnote.monospacedDigit().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            Slider(value: value, in: range)
+                .tint(.white.opacity(0.9))
+        }
     }
 }

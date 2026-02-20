@@ -14,3 +14,9 @@ Context was gathered on February 20, 2026 from official Apple sources and transl
 swift build
 swift run
 ```
+
+## Prototype Controls
+
+- Drag upward on the parent window to gesture into branching.
+- Use `Birth Two Branches` for button-triggered sequence.
+- Use the top-right motion tuning panel to calibrate spring/delay values live.

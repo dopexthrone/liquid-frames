@@ -54,4 +54,10 @@
 
 - Primary action toggles between branch and reset.
 - Replay action re-runs the full sequence.
-- Surfaces current phase for tuning and demo narration.
+- Surfaces current phase and live drag threshold progress.
+
+## 8) `MotionTuningPanel` (Live Calibration)
+
+- Exposes spring stiffness/damping and phase delay values.
+- Exposes gesture threshold and pull distance normalization.
+- Enables rapid calibration of "birth" feel during demo iteration.
