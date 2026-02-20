@@ -34,6 +34,8 @@
   - `branchEnergy`
 - Coordinates timing and spring choreography for the branch sequence.
 - Records run telemetry and produces quality/adaptation feedback for iterative tuning.
+- Applies velocity-dependent spring modulation to keep split/settle behavior stable under fast input.
+- Manages profile library state, active-profile dirty tracking, baselines, and regression checks.
 
 ## 4) `MotionIntelligence` (Core Motion Domain Layer)
 
@@ -43,6 +45,7 @@
 - Implements `MotionQualityEvaluator` for reliability scoring.
 - Implements `MotionAdaptiveEngine` for continuously self-improving profile adjustments.
 - Implements snapshot models for persistence/export and benchmark models for deterministic scoring.
+- Implements benchmark baseline + regression evaluator (`pass`/`warning`/`fail`) for profile-level quality gates.
 
 ## 5) `MotionStorage` (Workspace Persistence)
 
@@ -58,6 +61,7 @@
   - anchor points for branch lines
   - opacity/scale transforms
 - Keeps the motion legible across iMac and MacBook-style aspect ratios.
+- Applies branch spacing/collision guardrails and viewport boundary clamping at large and small sizes.
 
 ## 7) `LiquidPane` (Glass Card Primitive)
 
@@ -79,7 +83,7 @@
 
 ## 10) `MotionTuningPanel` (Live Calibration)
 
-- Exposes presets, auto-adapt toggle, spring/delay values, and gesture shaping values.
+- Exposes named profile controls plus presets, auto-adapt toggle, spring/delay values, and gesture shaping values.
 - Enables rapid calibration of "birth" feel during demo iteration.
 
 ## 11) `MotionTelemetryPanel` (Reliability Feedback)
@@ -87,6 +91,7 @@
 - Displays quality report with warnings from the evaluator.
 - Displays latest run phase timing breakdown and recent-run summary rows.
 - Displays deterministic benchmark report/grade and benchmark deltas.
+- Displays baseline regression status and profile-level benchmark deltas.
 - Supports run/benchmark clearing and workspace save/reload/export controls.
 
 ## 12) `Tests/liquid-framesTests/MotionIntelligenceTests.swift` (Verification)

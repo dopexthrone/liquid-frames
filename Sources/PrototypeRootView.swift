@@ -28,6 +28,10 @@ struct PrototypeRootView: View {
                 get: { motion.selectedPreset },
                 set: { motion.selectPreset($0) }
             )
+            let activeProfileBinding = Binding<UUID>(
+                get: { motion.activeProfileID ?? motion.profiles.first?.id ?? UUID() },
+                set: { motion.selectActiveProfile(id: $0) }
+            )
 
             ZStack {
                 AtmosphereBackground()
@@ -136,7 +140,15 @@ struct PrototypeRootView: View {
                         MotionTuningPanel(
                             tuning: tuningBinding,
                             selectedPreset: presetBinding,
+                            profiles: motion.profiles,
+                            activeProfileID: activeProfileBinding,
+                            profileIsDirty: motion.profileIsDirty,
                             autoAdaptEnabled: autoAdaptBinding,
+                            onCreateProfile: { motion.createProfileFromCurrent() },
+                            onDuplicateProfile: { motion.duplicateActiveProfile() },
+                            onDeleteProfile: { motion.deleteActiveProfile() },
+                            onSaveProfile: { motion.saveCurrentToActiveProfile() },
+                            onRevertProfile: { motion.revertFromActiveProfile() },
                             onApplyPreset: {
                                 motion.applySelectedPreset()
                             }
@@ -154,11 +166,17 @@ struct PrototypeRootView: View {
                             runs: Array(motion.runHistory.prefix(6)),
                             benchmarkReport: motion.benchmarkReport,
                             benchmarkHistory: Array(motion.benchmarkHistory.prefix(4)),
+                            benchmarkRegression: motion.benchmarkRegression,
+                            activeProfileName: motion.activeProfile?.name ?? "No Profile",
+                            activeProfileHasBaseline: motion.activeProfile?.baseline != nil,
+                            profileIsDirty: motion.profileIsDirty,
                             persistenceStatus: motion.persistenceStatus,
                             workspaceURL: motion.workspaceURL,
                             onRunBenchmark: {
                                 motion.runBenchmarkSuite(recordHistory: true)
                             },
+                            onSetBaseline: { motion.setBaselineFromCurrentBenchmark() },
+                            onClearBaseline: { motion.clearBaselineForActiveProfile() },
                             onClearRuns: { motion.clearRunHistory() },
                             onClearBenchmarks: { motion.clearBenchmarkHistory() },
                             onSaveWorkspace: { motion.saveWorkspaceNow() },
@@ -253,18 +271,47 @@ private struct PrototypeLayout {
         let settleInset = (1 - settleLift) * (34 + (18 * dynamicEnergy))
         let biasOffset = branchBias * (42 * splitCurve + (26 * dynamicEnergy))
 
-        leftCenter = CGPoint(
-            x: parentCenter.x - horizontalSpread + settleInset - biasOffset,
-            y: parentCenter.y - verticalRise
-        )
-        rightCenter = CGPoint(
-            x: parentCenter.x + horizontalSpread - settleInset + biasOffset,
-            y: parentCenter.y - verticalRise
-        )
-
         childSize = CGSize(width: baseWidth * 0.62, height: baseHeight * 0.74)
         childScale = Self.clamped01(0.3 + (0.7 * splitCurve) + (0.06 * dynamicEnergy))
         childOpacity = Self.clamped01(splitCurve + (gestureVelocity * 0.08))
+
+        var leftX = parentCenter.x - horizontalSpread + settleInset - biasOffset
+        var rightX = parentCenter.x + horizontalSpread - settleInset + biasOffset
+        let childVisualWidth = childSize.width * childScale
+        let minGap = max(30, childVisualWidth * 0.22)
+        let currentGap = rightX - leftX - childVisualWidth
+        if currentGap < minGap {
+            let correction = (minGap - currentGap) * 0.5
+            leftX -= correction
+            rightX += correction
+        }
+
+        let margin: CGFloat = 28
+        let minCenter = margin + (childVisualWidth * 0.5)
+        let maxCenter = size.width - margin - (childVisualWidth * 0.5)
+
+        if leftX < minCenter {
+            let shift = minCenter - leftX
+            leftX += shift
+            rightX += shift
+        }
+        if rightX > maxCenter {
+            let shift = rightX - maxCenter
+            leftX -= shift
+            rightX -= shift
+        }
+
+        leftX = Self.clamped(leftX, min: minCenter, max: maxCenter)
+        rightX = Self.clamped(rightX, min: minCenter, max: maxCenter)
+
+        let childY = Self.clamped(
+            parentCenter.y - verticalRise,
+            min: (childSize.height * 0.55) + 24,
+            max: size.height - (childSize.height * 0.55) - 24
+        )
+
+        leftCenter = CGPoint(x: leftX, y: childY)
+        rightCenter = CGPoint(x: rightX, y: childY)
 
         leftAnchor = CGPoint(
             x: leftCenter.x,
@@ -585,7 +632,15 @@ private struct ControlDeck: View {
 private struct MotionTuningPanel: View {
     @Binding var tuning: MotionTuning
     @Binding var selectedPreset: MotionPreset
+    let profiles: [MotionProfile]
+    @Binding var activeProfileID: UUID
+    let profileIsDirty: Bool
     @Binding var autoAdaptEnabled: Bool
+    let onCreateProfile: () -> Void
+    let onDuplicateProfile: () -> Void
+    let onDeleteProfile: () -> Void
+    let onSaveProfile: () -> Void
+    let onRevertProfile: () -> Void
     let onApplyPreset: () -> Void
 
     var body: some View {
@@ -603,6 +658,36 @@ private struct MotionTuningPanel: View {
                 Toggle("", isOn: $autoAdaptEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
+            }
+
+            HStack(spacing: 8) {
+                Picker("Profile", selection: $activeProfileID) {
+                    ForEach(profiles) { profile in
+                        Text(profile.name).tag(profile.id)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Button("New", action: onCreateProfile)
+                    .buttonStyle(.bordered)
+                Button("Dup", action: onDuplicateProfile)
+                    .buttonStyle(.bordered)
+                Button("Del", action: onDeleteProfile)
+                    .buttonStyle(.bordered)
+            }
+
+            HStack(spacing: 8) {
+                Text(profileIsDirty ? "Profile: Unsaved Changes" : "Profile: Synced")
+                    .font(.footnote.monospaced().weight(.regular))
+                    .foregroundStyle(profileIsDirty ? .orange.opacity(0.9) : .mint.opacity(0.9))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.11), in: Capsule())
+
+                Button("Save Profile", action: onSaveProfile)
+                    .buttonStyle(.bordered)
+                Button("Revert", action: onRevertProfile)
+                    .buttonStyle(.bordered)
             }
 
             HStack(spacing: 8) {
@@ -769,9 +854,15 @@ private struct MotionTelemetryPanel: View {
     let runs: [MotionRunMetrics]
     let benchmarkReport: MotionBenchmarkReport?
     let benchmarkHistory: [MotionBenchmarkReport]
+    let benchmarkRegression: MotionBenchmarkRegression?
+    let activeProfileName: String
+    let activeProfileHasBaseline: Bool
+    let profileIsDirty: Bool
     let persistenceStatus: String
     let workspaceURL: URL
     let onRunBenchmark: () -> Void
+    let onSetBaseline: () -> Void
+    let onClearBaseline: () -> Void
     let onClearRuns: () -> Void
     let onClearBenchmarks: () -> Void
     let onSaveWorkspace: () -> Void
@@ -796,6 +887,23 @@ private struct MotionTelemetryPanel: View {
                     .buttonStyle(.bordered)
             }
 
+            HStack(spacing: 8) {
+                Text("Profile: \(activeProfileName)")
+                    .font(.footnote.monospaced().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.white.opacity(0.11), in: Capsule())
+                if profileIsDirty {
+                    Text("Unsaved")
+                        .font(.footnote.monospaced().weight(.regular))
+                        .foregroundStyle(.orange.opacity(0.9))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(.white.opacity(0.11), in: Capsule())
+                }
+            }
+
             ForEach(quality.messages, id: \.self) { message in
                 Text(message)
                     .font(.footnote.weight(.regular))
@@ -816,6 +924,15 @@ private struct MotionTelemetryPanel: View {
                         Spacer(minLength: 0)
                         Button("Clear Bench", action: onClearBenchmarks)
                             .buttonStyle(.bordered)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button(activeProfileHasBaseline ? "Update Baseline" : "Set Baseline", action: onSetBaseline)
+                            .buttonStyle(.bordered)
+                        if activeProfileHasBaseline {
+                            Button("Clear Baseline", action: onClearBaseline)
+                                .buttonStyle(.bordered)
+                        }
                     }
 
                     ForEach(benchmarkReport.scenarios.prefix(4)) { scenario in
@@ -848,6 +965,29 @@ private struct MotionTelemetryPanel: View {
                                 .font(.caption.monospaced().weight(.regular))
                                 .foregroundStyle(delta >= 0 ? .mint.opacity(0.9) : .orange.opacity(0.9))
                         }
+                    }
+
+                    if let regression = benchmarkRegression {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Regression: \(regression.status.label)")
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(regression.status.color.opacity(0.9))
+                            Text(
+                                "Δoverall \(regression.overallDelta, format: .number.precision(.fractionLength(1)))  Δconsistency \(regression.consistencyDelta, format: .number.precision(.fractionLength(1)))  worst \(regression.worstScenarioDelta, format: .number.precision(.fractionLength(1)))"
+                            )
+                            .font(.caption.monospaced().weight(.regular))
+                            .foregroundStyle(.white.opacity(0.74))
+                            .lineLimit(2)
+                            ForEach(regression.messages, id: \.self) { message in
+                                Text(message)
+                                    .font(.caption.weight(.regular))
+                                    .foregroundStyle(.white.opacity(0.72))
+                            }
+                        }
+                    } else {
+                        Text("No baseline assigned for active profile.")
+                            .font(.caption.weight(.regular))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
                 .padding(.top, 4)
@@ -992,6 +1132,30 @@ private extension MotionBenchmarkGrade {
             .orange
         case .d:
             .red
+        }
+    }
+}
+
+private extension MotionBenchmarkRegressionStatus {
+    var color: Color {
+        switch self {
+        case .pass:
+            .mint
+        case .warning:
+            .orange
+        case .fail:
+            .red
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .pass:
+            "PASS"
+        case .warning:
+            "WARN"
+        case .fail:
+            "FAIL"
         }
     }
 }

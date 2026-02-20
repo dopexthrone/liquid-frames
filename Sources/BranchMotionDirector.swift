@@ -19,8 +19,13 @@ final class BranchMotionDirector: ObservableObject {
     @Published private(set) var gestureVelocity: CGFloat = 0
     @Published private(set) var branchBias: CGFloat = 0
     @Published private(set) var branchEnergy: CGFloat = 0
+
     @Published private(set) var selectedPreset: MotionPreset = .balanced
     @Published private(set) var tuning: MotionTuning = MotionPreset.balanced.tuning
+    @Published private(set) var profiles: [MotionProfile] = []
+    @Published private(set) var activeProfileID: UUID?
+    @Published private(set) var profileIsDirty = false
+
     @Published private(set) var runHistory: [MotionRunMetrics] = []
     @Published private(set) var qualityReport = MotionQualityReport(
         level: .healthy,
@@ -28,8 +33,11 @@ final class BranchMotionDirector: ObservableObject {
     )
     @Published private(set) var benchmarkReport: MotionBenchmarkReport?
     @Published private(set) var benchmarkHistory: [MotionBenchmarkReport] = []
+    @Published private(set) var benchmarkRegression: MotionBenchmarkRegression?
+
     @Published private(set) var workspaceURL: URL = MotionStorage.defaultWorkspaceURL()
     @Published private(set) var persistenceStatus: String = "No workspace saved yet."
+
     @Published var autoAdaptEnabled = true {
         didSet {
             refreshQualityReport()
@@ -44,8 +52,10 @@ final class BranchMotionDirector: ObservableObject {
 
     init() {
         loadWorkspace(initialLoad: true)
+        ensureProfileLibraryIntegrity()
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
     }
 
     var canBranch: Bool {
@@ -58,6 +68,11 @@ final class BranchMotionDirector: ObservableObject {
 
     var latestRun: MotionRunMetrics? {
         runHistory.first
+    }
+
+    var activeProfile: MotionProfile? {
+        guard let id = activeProfileID else { return nil }
+        return profiles.first { $0.id == id }
     }
 
     func triggerBranch(trigger: MotionTrigger = .button) {
@@ -138,6 +153,7 @@ final class BranchMotionDirector: ObservableObject {
         tuning = candidate.normalized()
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
         queuePersistenceWrite()
     }
 
@@ -146,11 +162,107 @@ final class BranchMotionDirector: ObservableObject {
         tuning = preset.tuning.normalized()
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
         queuePersistenceWrite()
     }
 
     func setAutoAdapt(_ enabled: Bool) {
         autoAdaptEnabled = enabled
+    }
+
+    func selectActiveProfile(id: UUID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        activeProfileID = profile.id
+        tuning = profile.tuning.normalized()
+        refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func createProfileFromCurrent() {
+        let now = Date()
+        let profile = MotionProfile(
+            id: UUID(),
+            name: "Profile \(profiles.count + 1)",
+            notes: "Created from current tuning.",
+            tuning: tuning.normalized(),
+            baseline: benchmarkReport.map(MotionBenchmarkBaseline.init(report:)),
+            createdAt: now,
+            updatedAt: now
+        )
+        profiles.insert(profile, at: 0)
+        activeProfileID = profile.id
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func duplicateActiveProfile() {
+        guard let active = activeProfile else { return }
+        let now = Date()
+        let profile = MotionProfile(
+            id: UUID(),
+            name: "\(active.name) Copy",
+            notes: active.notes,
+            tuning: active.tuning,
+            baseline: active.baseline,
+            createdAt: now,
+            updatedAt: now
+        )
+        profiles.insert(profile, at: 0)
+        activeProfileID = profile.id
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func deleteActiveProfile() {
+        guard let activeID = activeProfileID else { return }
+        guard profiles.count > 1 else {
+            persistenceStatus = "At least one profile must exist."
+            return
+        }
+        profiles.removeAll { $0.id == activeID }
+        activeProfileID = profiles.first?.id
+        if let profile = activeProfile {
+            tuning = profile.tuning.normalized()
+        }
+        refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func saveCurrentToActiveProfile() {
+        guard let activeID = activeProfileID, let index = profiles.firstIndex(where: { $0.id == activeID }) else { return }
+        profiles[index].tuning = tuning.normalized()
+        profiles[index].updatedAt = Date()
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func revertFromActiveProfile() {
+        guard let profile = activeProfile else { return }
+        tuning = profile.tuning.normalized()
+        refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
+    }
+
+    func setBaselineFromCurrentBenchmark() {
+        guard let report = benchmarkReport else { return }
+        guard let activeID = activeProfileID, let index = profiles.firstIndex(where: { $0.id == activeID }) else { return }
+        profiles[index].baseline = MotionBenchmarkBaseline(report: report)
+        profiles[index].updatedAt = Date()
+        evaluateBenchmarkRegression()
+        queuePersistenceWrite()
+    }
+
+    func clearBaselineForActiveProfile() {
+        guard let activeID = activeProfileID, let index = profiles.firstIndex(where: { $0.id == activeID }) else { return }
+        profiles[index].baseline = nil
+        profiles[index].updatedAt = Date()
+        evaluateBenchmarkRegression()
+        queuePersistenceWrite()
     }
 
     func clearRunHistory() {
@@ -162,6 +274,7 @@ final class BranchMotionDirector: ObservableObject {
 
     func clearBenchmarkHistory() {
         benchmarkHistory.removeAll()
+        queuePersistenceWrite()
     }
 
     func runBenchmarkSuite(recordHistory: Bool = true) {
@@ -172,6 +285,10 @@ final class BranchMotionDirector: ObservableObject {
             if benchmarkHistory.count > 24 {
                 benchmarkHistory.removeLast(benchmarkHistory.count - 24)
             }
+        }
+        evaluateBenchmarkRegression()
+        if recordHistory {
+            queuePersistenceWrite()
         }
     }
 
@@ -188,7 +305,10 @@ final class BranchMotionDirector: ObservableObject {
 
     func reloadWorkspace() {
         loadWorkspace(initialLoad: false)
+        ensureProfileLibraryIntegrity()
+        refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
     }
 
     func exportWorkspaceToDesktop() {
@@ -225,6 +345,11 @@ final class BranchMotionDirector: ObservableObject {
     private func runSequence(preSplitDelay: Double, trigger: MotionTrigger) {
         sequenceTask?.cancel()
         let tuningSnapshot = tuning
+        let springs = Self.dynamicSprings(
+            tuning: tuningSnapshot,
+            peakVelocity: pendingPeaks.velocity,
+            prepPeak: pendingPeaks.prep
+        )
         startRun(trigger: trigger)
 
         sequenceTask = Task {
@@ -240,8 +365,8 @@ final class BranchMotionDirector: ObservableObject {
                 }
                 withAnimation(
                     .interpolatingSpring(
-                        stiffness: tuningSnapshot.splitStiffness,
-                        damping: tuningSnapshot.splitDamping
+                        stiffness: springs.splitStiffness,
+                        damping: springs.splitDamping
                     )
                 ) {
                     splitProgress = 1
@@ -256,8 +381,8 @@ final class BranchMotionDirector: ObservableObject {
                 markSettlePhase()
                 withAnimation(
                     .interpolatingSpring(
-                        stiffness: tuningSnapshot.settleStiffness,
-                        damping: tuningSnapshot.settleDamping
+                        stiffness: springs.settleStiffness,
+                        damping: springs.settleDamping
                     )
                 ) {
                     settleProgress = 1
@@ -343,6 +468,7 @@ final class BranchMotionDirector: ObservableObject {
 
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
+        refreshProfileDirtyFlag()
         queuePersistenceWrite()
         inFlightRun = nil
         pendingPeaks.reset()
@@ -352,12 +478,58 @@ final class BranchMotionDirector: ObservableObject {
         qualityReport = MotionQualityEvaluator.evaluate(tuning: tuning, recentRuns: runHistory)
     }
 
+    private func evaluateBenchmarkRegression() {
+        guard let report = benchmarkReport, let baseline = activeProfile?.baseline else {
+            benchmarkRegression = nil
+            return
+        }
+        benchmarkRegression = MotionBenchmarkRegressionEvaluator.compare(report: report, baseline: baseline)
+    }
+
+    private func refreshProfileDirtyFlag() {
+        guard let profile = activeProfile else {
+            profileIsDirty = false
+            return
+        }
+        profileIsDirty = profile.tuning.normalized() != tuning.normalized()
+    }
+
+    private func ensureProfileLibraryIntegrity() {
+        if profiles.isEmpty {
+            let now = Date()
+            let profile = MotionProfile(
+                id: UUID(),
+                name: "Default",
+                notes: "Auto-generated profile.",
+                tuning: tuning.normalized(),
+                baseline: nil,
+                createdAt: now,
+                updatedAt: now
+            )
+            profiles = [profile]
+            activeProfileID = profile.id
+            profileIsDirty = false
+            return
+        }
+
+        if let activeID = activeProfileID, profiles.contains(where: { $0.id == activeID }) {
+            refreshProfileDirtyFlag()
+        } else {
+            activeProfileID = profiles.first?.id
+            refreshProfileDirtyFlag()
+        }
+    }
+
     private func makeWorkspaceSnapshot() -> MotionWorkspaceSnapshot {
         MotionWorkspaceSnapshot(
             selectedPresetRawValue: selectedPreset.rawValue,
             autoAdaptEnabled: autoAdaptEnabled,
             tuning: MotionTuningRecord(tuning: tuning),
             runHistory: runHistory.map(MotionRunRecord.init(metrics:)),
+            profiles: profiles.map(MotionProfileRecord.init(profile:)),
+            activeProfileID: activeProfileID?.uuidString,
+            benchmarkHistory: benchmarkHistory.map(MotionBenchmarkRecord.init(report:)),
+            latestBenchmark: benchmarkReport.map(MotionBenchmarkRecord.init(report:)),
             savedAt: Date()
         )
     }
@@ -371,6 +543,15 @@ final class BranchMotionDirector: ObservableObject {
         if runHistory.count > 40 {
             runHistory.removeLast(runHistory.count - 40)
         }
+
+        profiles = snapshot.profiles.map(\.profile)
+            .sorted(by: { $0.updatedAt > $1.updatedAt })
+        activeProfileID = snapshot.activeProfileID.flatMap(UUID.init(uuidString:))
+
+        benchmarkHistory = snapshot.benchmarkHistory.map(\.report)
+            .sorted(by: { $0.generatedAt > $1.generatedAt })
+        benchmarkReport = snapshot.latestBenchmark?.report ?? benchmarkHistory.first
+
         persistenceStatus = "Loaded \(Self.timeFormatter.string(from: snapshot.savedAt))"
     }
 
@@ -408,6 +589,43 @@ final class BranchMotionDirector: ObservableObject {
 
     private func maxByMagnitude(lhs: CGFloat, rhs: CGFloat) -> CGFloat {
         abs(rhs) > abs(lhs) ? rhs : lhs
+    }
+
+    private static func dynamicSprings(
+        tuning: MotionTuning,
+        peakVelocity: CGFloat,
+        prepPeak: CGFloat
+    ) -> MotionSprings {
+        let velocity = Double(max(0, min(1, peakVelocity)))
+        let prep = Double(max(0, min(1, prepPeak)))
+
+        let splitStiffness = clamp(
+            tuning.splitStiffness * (1 + (0.16 * velocity)),
+            to: MotionTuning.splitStiffnessRange
+        )
+        let splitDamping = clamp(
+            tuning.splitDamping * (1 + (0.24 * velocity)),
+            to: MotionTuning.splitDampingRange
+        )
+        let settleStiffness = clamp(
+            tuning.settleStiffness * (1 + (0.08 * prep)),
+            to: MotionTuning.settleStiffnessRange
+        )
+        let settleDamping = clamp(
+            tuning.settleDamping * (1 + (0.32 * velocity)),
+            to: MotionTuning.settleDampingRange
+        )
+
+        return MotionSprings(
+            splitStiffness: splitStiffness,
+            splitDamping: splitDamping,
+            settleStiffness: settleStiffness,
+            settleDamping: settleDamping
+        )
+    }
+
+    private static func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
+        Swift.max(range.lowerBound, Swift.min(range.upperBound, value))
     }
 
     private static func pause(seconds: Double) async {
@@ -455,4 +673,11 @@ private struct InFlightRun {
     var prepPeak: CGFloat
     var velocityPeak: CGFloat
     var biasPeak: CGFloat
+}
+
+private struct MotionSprings {
+    let splitStiffness: Double
+    let splitDamping: Double
+    let settleStiffness: Double
+    let settleDamping: Double
 }

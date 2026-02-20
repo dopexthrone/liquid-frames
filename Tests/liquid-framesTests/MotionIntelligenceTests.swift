@@ -107,11 +107,16 @@ func workspaceSnapshotRoundTripPersistsCoreState() throws {
         .appendingPathComponent("liquid-frames-tests", isDirectory: true)
         .appendingPathComponent(UUID().uuidString + ".json", isDirectory: false)
 
+    let profile = sampleProfile(name: "Cinematic RC")
     let snapshot = MotionWorkspaceSnapshot(
         selectedPresetRawValue: MotionPreset.cinematic.rawValue,
         autoAdaptEnabled: false,
         tuning: MotionTuningRecord(tuning: MotionPreset.cinematic.tuning),
         runHistory: [MotionRunRecord(metrics: sampleRun(duration: 1.41))],
+        profiles: [MotionProfileRecord(profile: profile)],
+        activeProfileID: profile.id.uuidString,
+        benchmarkHistory: [MotionBenchmarkRecord(report: sampleBenchmarkReport(score: 87))],
+        latestBenchmark: MotionBenchmarkRecord(report: sampleBenchmarkReport(score: 87)),
         savedAt: Date(timeIntervalSince1970: 1_700_000_000)
     )
 
@@ -123,6 +128,67 @@ func workspaceSnapshotRoundTripPersistsCoreState() throws {
     #expect(loaded.tuning == snapshot.tuning)
     #expect(loaded.runHistory.count == 1)
     #expect(loaded.runHistory.first?.triggerRawValue == MotionTrigger.button.rawValue)
+    #expect(loaded.profiles.count == 1)
+    #expect(loaded.latestBenchmark?.gradeRawValue == MotionBenchmarkGrade.b.rawValue)
+}
+
+@Test
+func benchmarkRegressionEvaluatorFlagsFailures() {
+    let baseline = MotionBenchmarkBaseline(report: sampleBenchmarkReport(score: 92))
+    let regressed = sampleBenchmarkReport(
+        score: 80,
+        consistency: 70,
+        scenarioOverrides: [
+            "Gentle Gesture": 78,
+            "Assertive Gesture": 71,
+            "Lateral Bias Gesture": 60,
+            "Button Trigger": 73
+        ]
+    )
+
+    let regression = MotionBenchmarkRegressionEvaluator.compare(report: regressed, baseline: baseline)
+
+    #expect(regression.status == .fail)
+    #expect(regression.overallDelta < 0)
+    #expect(regression.worstScenarioDelta < -10)
+}
+
+@Test
+func legacySnapshotDecodeUsesDefaultsForNewFields() throws {
+    let legacyJSON = """
+    {
+      "schemaVersion": 1,
+      "selectedPresetRawValue": "balanced",
+      "autoAdaptEnabled": true,
+      "tuning": {
+        "splitStiffness": 180,
+        "splitDamping": 22,
+        "settleStiffness": 145,
+        "settleDamping": 14,
+        "preSplitDelay": 0.32,
+        "gestureCommitDelay": 0.10,
+        "preSettleDelay": 0.56,
+        "postSettleDelay": 0.42,
+        "gestureThreshold": 0.62,
+        "pullDistance": 210,
+        "velocityScale": 160,
+        "velocityInfluence": 0.72,
+        "biasInfluence": 0.45
+      },
+      "runHistory": [],
+      "savedAt": "2023-11-14T22:13:20Z"
+    }
+    """
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let snapshot = try decoder.decode(MotionWorkspaceSnapshot.self, from: Data(legacyJSON.utf8))
+
+    #expect(snapshot.selectedPresetRawValue == MotionPreset.balanced.rawValue)
+    #expect(snapshot.profiles.isEmpty)
+    #expect(snapshot.activeProfileID == nil)
+    #expect(snapshot.benchmarkHistory.isEmpty)
+    #expect(snapshot.latestBenchmark == nil)
 }
 
 private func sampleRun(duration: Double) -> MotionRunMetrics {
@@ -137,5 +203,63 @@ private func sampleRun(duration: Double) -> MotionRunMetrics {
             preSettle: duration * 0.44,
             settleTail: duration * 0.28
         )
+    )
+}
+
+private func sampleProfile(name: String) -> MotionProfile {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    return MotionProfile(
+        id: UUID(),
+        name: name,
+        notes: "test",
+        tuning: MotionPreset.cinematic.tuning,
+        baseline: MotionBenchmarkBaseline(report: sampleBenchmarkReport(score: 86)),
+        createdAt: now,
+        updatedAt: now
+    )
+}
+
+private func sampleBenchmarkReport(
+    score: Double,
+    consistency: Double = 82,
+    scenarioOverrides: [String: Double] = [:]
+) -> MotionBenchmarkReport {
+    let baseScores: [String: Double] = [
+        "Gentle Gesture": 88,
+        "Assertive Gesture": 84,
+        "Lateral Bias Gesture": 83,
+        "Button Trigger": 86
+    ]
+
+    let scenarios = baseScores.map { key, baseValue in
+        MotionBenchmarkScenarioResult(
+            scenarioName: key,
+            trigger: key == "Button Trigger" ? .button : .gesture,
+            estimatedDuration: 1.34,
+            responsiveness: 0.82,
+            stability: 0.8,
+            score: scenarioOverrides[key] ?? baseValue
+        )
+    }
+
+    let grade: MotionBenchmarkGrade
+    switch score {
+    case 88...:
+        grade = .a
+    case 75..<88:
+        grade = .b
+    case 62..<75:
+        grade = .c
+    default:
+        grade = .d
+    }
+
+    return MotionBenchmarkReport(
+        generatedAt: Date(timeIntervalSince1970: 1_700_000_100),
+        overallScore: score,
+        consistencyScore: consistency,
+        grade: grade,
+        scenarios: scenarios,
+        quality: MotionQualityReport(level: .healthy, messages: ["ok"])
     )
 }

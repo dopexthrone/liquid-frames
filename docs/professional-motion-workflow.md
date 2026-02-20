@@ -10,7 +10,13 @@ This workflow is for teams that need repeatable, production-quality motion behav
 
 Apply a preset first, then tune from there.
 
-## 2) Run Calibration Loops
+## 2) Create Named Profiles
+
+- Create a profile per target experience (for example: `iMac-Prod`, `MacBook-Responsive`, `Demo-Cinematic`).
+- Keep one active profile at a time and monitor the dirty flag.
+- Save profile state after meaningful tuning changes.
+
+## 3) Run Calibration Loops
 
 1. Run 5-10 interactions using realistic drag styles.
 2. Watch the quality badge (`Healthy`, `Caution`, `Unstable`).
@@ -23,14 +29,14 @@ Apply a preset first, then tune from there.
    - settle feel: `settleStiffness`, `settleDamping`
    - pacing: delay parameters
 
-## 3) Use Auto-Adapt Intentionally
+## 4) Use Auto-Adapt Intentionally
 
 - Enable auto-adapt during early tuning sprints to converge faster.
 - Disable auto-adapt when finalizing motion for a release candidate.
 - Clear run history before comparing two candidate profiles.
 - Clear benchmark history before benchmarking a new profile family.
 
-## 4) Persist and Share Profiles
+## 5) Persist and Share Profiles
 
 - Workspace auto-saves to:
   - `~/Library/Application Support/liquid-frames/motion-workspace.json`
@@ -38,9 +44,9 @@ Apply a preset first, then tune from there.
   - `Save`: force-write latest workspace state.
   - `Reload`: restore latest saved snapshot.
   - `Export JSON`: create timestamped snapshot for team review and build artifacts.
-- Include exported JSON in PRs when motion profiles are updated.
+- Include exported JSON in PRs when motion profiles or baselines are updated.
 
-## 5) Reliability Targets
+## 6) Reliability Targets
 
 - Stable end-to-end branch transition timing across repeated runs.
 - No abrupt branch curvature jumps at high gesture velocity.
@@ -48,8 +54,12 @@ Apply a preset first, then tune from there.
 - Quality report should remain `Healthy` over repeated runs.
 - Benchmark grade target: `A` or `B` for release candidates.
 - Benchmark consistency score should remain high across iterations.
+- Regression target versus baseline:
+  - release branch should remain `PASS`
+  - `WARNING` requires review
+  - `FAIL` blocks motion-profile promotion
 
-## 6) Engineering Verification
+## 7) Engineering Verification
 
 Run these checks before shipping changes:
 
@@ -65,4 +75,5 @@ Focus of test suite:
 - adaptive behavior under slow timing
 - quality instability detection
 - deterministic benchmark scoring
+- deterministic benchmark regression classification
 - snapshot persistence roundtrip

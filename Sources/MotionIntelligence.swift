@@ -248,13 +248,96 @@ enum MotionAdaptiveEngine {
     }
 }
 
+struct MotionProfile: Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var notes: String
+    var tuning: MotionTuning
+    var baseline: MotionBenchmarkBaseline?
+    var createdAt: Date
+    var updatedAt: Date
+}
+
 struct MotionWorkspaceSnapshot: Codable, Equatable {
-    var schemaVersion: Int = 1
+    var schemaVersion: Int
     var selectedPresetRawValue: String
     var autoAdaptEnabled: Bool
     var tuning: MotionTuningRecord
     var runHistory: [MotionRunRecord]
+    var profiles: [MotionProfileRecord]
+    var activeProfileID: String?
+    var benchmarkHistory: [MotionBenchmarkRecord]
+    var latestBenchmark: MotionBenchmarkRecord?
     var savedAt: Date
+
+    init(
+        schemaVersion: Int = 2,
+        selectedPresetRawValue: String,
+        autoAdaptEnabled: Bool,
+        tuning: MotionTuningRecord,
+        runHistory: [MotionRunRecord],
+        profiles: [MotionProfileRecord],
+        activeProfileID: String?,
+        benchmarkHistory: [MotionBenchmarkRecord],
+        latestBenchmark: MotionBenchmarkRecord?,
+        savedAt: Date
+    ) {
+        self.schemaVersion = schemaVersion
+        self.selectedPresetRawValue = selectedPresetRawValue
+        self.autoAdaptEnabled = autoAdaptEnabled
+        self.tuning = tuning
+        self.runHistory = runHistory
+        self.profiles = profiles
+        self.activeProfileID = activeProfileID
+        self.benchmarkHistory = benchmarkHistory
+        self.latestBenchmark = latestBenchmark
+        self.savedAt = savedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case selectedPresetRawValue
+        case autoAdaptEnabled
+        case tuning
+        case runHistory
+        case profiles
+        case activeProfileID
+        case benchmarkHistory
+        case latestBenchmark
+        case savedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        selectedPresetRawValue = try container.decodeIfPresent(
+            String.self,
+            forKey: .selectedPresetRawValue
+        ) ?? MotionPreset.balanced.rawValue
+        autoAdaptEnabled = try container.decodeIfPresent(Bool.self, forKey: .autoAdaptEnabled) ?? true
+        tuning = try container.decodeIfPresent(MotionTuningRecord.self, forKey: .tuning)
+            ?? MotionTuningRecord(tuning: MotionPreset.balanced.tuning)
+        runHistory = try container.decodeIfPresent([MotionRunRecord].self, forKey: .runHistory) ?? []
+        profiles = try container.decodeIfPresent([MotionProfileRecord].self, forKey: .profiles) ?? []
+        activeProfileID = try container.decodeIfPresent(String.self, forKey: .activeProfileID)
+        benchmarkHistory = try container.decodeIfPresent([MotionBenchmarkRecord].self, forKey: .benchmarkHistory) ?? []
+        latestBenchmark = try container.decodeIfPresent(MotionBenchmarkRecord.self, forKey: .latestBenchmark)
+        savedAt = try container.decodeIfPresent(Date.self, forKey: .savedAt) ?? Date()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(selectedPresetRawValue, forKey: .selectedPresetRawValue)
+        try container.encode(autoAdaptEnabled, forKey: .autoAdaptEnabled)
+        try container.encode(tuning, forKey: .tuning)
+        try container.encode(runHistory, forKey: .runHistory)
+        try container.encode(profiles, forKey: .profiles)
+        try container.encode(activeProfileID, forKey: .activeProfileID)
+        try container.encode(benchmarkHistory, forKey: .benchmarkHistory)
+        try container.encode(latestBenchmark, forKey: .latestBenchmark)
+        try container.encode(savedAt, forKey: .savedAt)
+    }
 }
 
 struct MotionTuningRecord: Codable, Equatable {
@@ -307,6 +390,38 @@ struct MotionTuningRecord: Codable, Equatable {
     }
 }
 
+struct MotionProfileRecord: Codable, Equatable {
+    var id: String
+    var name: String
+    var notes: String
+    var tuning: MotionTuningRecord
+    var baseline: MotionBenchmarkBaseline?
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(profile: MotionProfile) {
+        id = profile.id.uuidString
+        name = profile.name
+        notes = profile.notes
+        tuning = MotionTuningRecord(tuning: profile.tuning)
+        baseline = profile.baseline
+        createdAt = profile.createdAt
+        updatedAt = profile.updatedAt
+    }
+
+    var profile: MotionProfile {
+        MotionProfile(
+            id: UUID(uuidString: id) ?? UUID(),
+            name: name,
+            notes: notes,
+            tuning: tuning.tuning,
+            baseline: baseline,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+}
+
 struct MotionRunRecord: Codable, Equatable {
     var timestamp: Date
     var triggerRawValue: String
@@ -344,6 +459,69 @@ struct MotionRunRecord: Codable, Equatable {
     }
 }
 
+struct MotionBenchmarkScenarioRecord: Codable, Equatable {
+    var scenarioName: String
+    var triggerRawValue: String
+    var estimatedDuration: Double
+    var responsiveness: Double
+    var stability: Double
+    var score: Double
+
+    init(scenario: MotionBenchmarkScenarioResult) {
+        scenarioName = scenario.scenarioName
+        triggerRawValue = scenario.trigger.rawValue
+        estimatedDuration = scenario.estimatedDuration
+        responsiveness = scenario.responsiveness
+        stability = scenario.stability
+        score = scenario.score
+    }
+
+    var scenario: MotionBenchmarkScenarioResult {
+        MotionBenchmarkScenarioResult(
+            scenarioName: scenarioName,
+            trigger: MotionTrigger(rawValue: triggerRawValue) ?? .button,
+            estimatedDuration: estimatedDuration,
+            responsiveness: responsiveness,
+            stability: stability,
+            score: score
+        )
+    }
+}
+
+struct MotionBenchmarkRecord: Codable, Equatable {
+    var generatedAt: Date
+    var overallScore: Double
+    var consistencyScore: Double
+    var gradeRawValue: String
+    var scenarios: [MotionBenchmarkScenarioRecord]
+    var qualityLevelRawValue: String
+    var qualityMessages: [String]
+
+    init(report: MotionBenchmarkReport) {
+        generatedAt = report.generatedAt
+        overallScore = report.overallScore
+        consistencyScore = report.consistencyScore
+        gradeRawValue = report.grade.rawValue
+        scenarios = report.scenarios.map(MotionBenchmarkScenarioRecord.init(scenario:))
+        qualityLevelRawValue = report.quality.level.rawValue
+        qualityMessages = report.quality.messages
+    }
+
+    var report: MotionBenchmarkReport {
+        MotionBenchmarkReport(
+            generatedAt: generatedAt,
+            overallScore: overallScore,
+            consistencyScore: consistencyScore,
+            grade: MotionBenchmarkGrade(rawValue: gradeRawValue) ?? .d,
+            scenarios: scenarios.map(\.scenario),
+            quality: MotionQualityReport(
+                level: MotionQualityLevel(rawValue: qualityLevelRawValue) ?? .caution,
+                messages: qualityMessages
+            )
+        )
+    }
+}
+
 enum MotionBenchmarkGrade: String, Codable {
     case a = "A"
     case b = "B"
@@ -374,6 +552,100 @@ struct MotionBenchmarkReport: Equatable, Identifiable {
 
     var id: Date {
         generatedAt
+    }
+}
+
+struct MotionBenchmarkBaseline: Codable, Equatable {
+    let generatedAt: Date
+    let overallScore: Double
+    let consistencyScore: Double
+    let gradeRawValue: String
+    let scenarioScores: [String: Double]
+
+    init(report: MotionBenchmarkReport) {
+        generatedAt = report.generatedAt
+        overallScore = report.overallScore
+        consistencyScore = report.consistencyScore
+        gradeRawValue = report.grade.rawValue
+        scenarioScores = report.scenarios.reduce(into: [:]) { partial, scenario in
+            partial[scenario.scenarioName] = scenario.score
+        }
+    }
+
+    var grade: MotionBenchmarkGrade {
+        MotionBenchmarkGrade(rawValue: gradeRawValue) ?? .d
+    }
+}
+
+enum MotionBenchmarkRegressionStatus: String {
+    case pass
+    case warning
+    case fail
+}
+
+struct MotionBenchmarkRegression: Equatable {
+    let status: MotionBenchmarkRegressionStatus
+    let overallDelta: Double
+    let consistencyDelta: Double
+    let worstScenarioDelta: Double
+    let messages: [String]
+}
+
+enum MotionBenchmarkRegressionEvaluator {
+    static func compare(
+        report: MotionBenchmarkReport,
+        baseline: MotionBenchmarkBaseline
+    ) -> MotionBenchmarkRegression {
+        let overallDelta = report.overallScore - baseline.overallScore
+        let consistencyDelta = report.consistencyScore - baseline.consistencyScore
+
+        let scenarioDeltas = report.scenarios.map { scenario -> Double in
+            let baselineScore = baseline.scenarioScores[scenario.scenarioName] ?? scenario.score
+            return scenario.score - baselineScore
+        }
+        let worstScenarioDelta = scenarioDeltas.min() ?? 0
+
+        var messages: [String] = []
+        if overallDelta < -6 {
+            messages.append("Overall benchmark score regressed significantly.")
+        } else if overallDelta < -2.5 {
+            messages.append("Overall benchmark score regressed mildly.")
+        } else if overallDelta > 2.5 {
+            messages.append("Overall benchmark score improved.")
+        }
+
+        if consistencyDelta < -6 {
+            messages.append("Consistency score regressed.")
+        } else if consistencyDelta > 4 {
+            messages.append("Consistency score improved.")
+        }
+
+        if worstScenarioDelta < -12 {
+            messages.append("At least one benchmark scenario regressed heavily.")
+        } else if worstScenarioDelta < -6 {
+            messages.append("One or more scenarios regressed.")
+        }
+
+        let status: MotionBenchmarkRegressionStatus
+        if overallDelta < -6 || consistencyDelta < -8 || worstScenarioDelta < -12 {
+            status = .fail
+        } else if overallDelta < -2.5 || consistencyDelta < -4 || worstScenarioDelta < -6 {
+            status = .warning
+        } else {
+            status = .pass
+        }
+
+        if messages.isEmpty {
+            messages.append("Benchmark is stable against baseline.")
+        }
+
+        return MotionBenchmarkRegression(
+            status: status,
+            overallDelta: overallDelta,
+            consistencyDelta: consistencyDelta,
+            worstScenarioDelta: worstScenarioDelta,
+            messages: messages
+        )
     }
 }
 
