@@ -20,3 +20,4 @@ swift run
 - Drag upward on the parent window to gesture into branching.
 - Use `Birth Two Branches` for button-triggered sequence.
 - Use the top-right motion tuning panel to calibrate spring/delay values live.
+- Drag speed and direction now deform branch curvature and split energy in real time.

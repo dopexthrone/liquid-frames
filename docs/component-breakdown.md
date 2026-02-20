@@ -28,6 +28,10 @@
   - `splitProgress`
   - `settleProgress`
   - `glowPulse`
+- Emits motion-shaping signals:
+  - `gestureVelocity`
+  - `branchBias`
+  - `branchEnergy`
 - Coordinates timing and spring choreography for the branch sequence.
 
 ## 4) `PrototypeLayout` (Adaptive Layout Engine)
@@ -49,6 +53,7 @@
 
 - Draws two curved paths that emerge from the parent and connect to children.
 - Uses progressive trim and glow-stroke styling to sell “birth” continuity.
+- Deforms branch curvature and line energy in response to drag velocity and directional bias.
 
 ## 7) `ControlDeck` (Interaction Controls)
 

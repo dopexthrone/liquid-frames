@@ -21,6 +21,9 @@ struct MotionTuning {
 
     var gestureThreshold: CGFloat = 0.62
     var pullDistance: CGFloat = 210
+    var velocityScale: CGFloat = 160
+    var velocityInfluence: CGFloat = 0.72
+    var biasInfluence: CGFloat = 0.45
 }
 
 @MainActor
@@ -31,6 +34,9 @@ final class BranchMotionDirector: ObservableObject {
     @Published private(set) var settleProgress: CGFloat = 0
     @Published private(set) var glowPulse: CGFloat = 0
     @Published private(set) var showsChildren: Bool = false
+    @Published private(set) var gestureVelocity: CGFloat = 0
+    @Published private(set) var branchBias: CGFloat = 0
+    @Published private(set) var branchEnergy: CGFloat = 0
     @Published var tuning = MotionTuning()
 
     private var sequenceTask: Task<Void, Never>?
@@ -52,23 +58,44 @@ final class BranchMotionDirector: ObservableObject {
         withAnimation(.easeInOut(duration: 0.28)) {
             prepProgress = 1
             glowPulse = 1
+            branchBias = 0
+            branchEnergy = max(branchEnergy, 0.32)
+            gestureVelocity = max(gestureVelocity, 0.28)
         }
 
         runSequence(preSplitDelay: tuning.preSplitDelay)
     }
 
-    func updateGesture(translation: CGSize) {
+    func updateGesture(value: DragGesture.Value) {
         guard phase == .idle || phase == .gesturing else { return }
         sequenceTask?.cancel()
         sequenceTask = nil
 
         phase = .gesturing
 
+        let translation = value.translation
         let pull = max(0, -translation.height) + (abs(translation.width) * 0.25)
         let normalized = min(1, pull / max(120, tuning.pullDistance))
 
+        let projectedDeltaX = value.predictedEndTranslation.width - translation.width
+        let projectedDeltaY = value.predictedEndTranslation.height - translation.height
+        let projectedDistance = hypot(projectedDeltaX, projectedDeltaY)
+        let velocity = min(1, projectedDistance / max(80, tuning.velocityScale))
+
+        let horizontalBias = translation.width / max(80, tuning.pullDistance * 0.8)
+        let projectedBias = projectedDeltaX / max(100, tuning.pullDistance)
+        let combinedBias = clamp(
+            horizontalBias + (projectedBias * tuning.biasInfluence),
+            min: -1,
+            max: 1
+        )
+        let energy = min(1, (normalized * 0.35) + (velocity * tuning.velocityInfluence))
+
         prepProgress = normalized
-        glowPulse = min(1, normalized * 1.15)
+        glowPulse = min(1, (normalized * 1.1) + (velocity * 0.2))
+        gestureVelocity = velocity
+        branchBias = combinedBias
+        branchEnergy = energy
     }
 
     func endGesture() {
@@ -86,6 +113,9 @@ final class BranchMotionDirector: ObservableObject {
         withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
             prepProgress = 0
             glowPulse = 0
+            gestureVelocity = 0
+            branchBias = 0
+            branchEnergy = 0
         }
         phase = .idle
     }
@@ -100,6 +130,9 @@ final class BranchMotionDirector: ObservableObject {
             settleProgress = 0
             glowPulse = 0
             showsChildren = false
+            gestureVelocity = 0
+            branchBias = 0
+            branchEnergy = 0
         }
 
         phase = .idle
@@ -116,6 +149,9 @@ final class BranchMotionDirector: ObservableObject {
             await MainActor.run {
                 phase = .splitting
                 showsChildren = true
+                withAnimation(.easeOut(duration: 0.2)) {
+                    branchEnergy = max(branchEnergy, 0.28)
+                }
                 withAnimation(
                     .interpolatingSpring(
                         stiffness: tuningSnapshot.splitStiffness,
@@ -140,6 +176,11 @@ final class BranchMotionDirector: ObservableObject {
                     settleProgress = 1
                     glowPulse = 0
                 }
+                withAnimation(.easeOut(duration: max(0.2, tuningSnapshot.postSettleDelay))) {
+                    branchEnergy *= 0.55
+                    branchBias *= 0.65
+                    gestureVelocity *= 0.35
+                }
             }
 
             await Self.pause(seconds: tuningSnapshot.postSettleDelay)
@@ -147,8 +188,17 @@ final class BranchMotionDirector: ObservableObject {
 
             await MainActor.run {
                 phase = .branched
+                withAnimation(.easeOut(duration: 0.25)) {
+                    branchEnergy = 0
+                    branchBias = 0
+                    gestureVelocity = 0
+                }
             }
         }
+    }
+
+    private func clamp(_ value: CGFloat, min: CGFloat, max: CGFloat) -> CGFloat {
+        Swift.max(min, Swift.min(max, value))
     }
 
     private static func pause(seconds: Double) async {

@@ -8,9 +8,13 @@ struct PrototypeRootView: View {
         GeometryReader { proxy in
             let layout = PrototypeLayout(
                 size: proxy.size,
+                phase: motion.phase,
                 prepProgress: motion.prepProgress,
                 splitProgress: motion.splitProgress,
-                settleProgress: motion.settleProgress
+                settleProgress: motion.settleProgress,
+                branchBias: motion.branchBias,
+                branchEnergy: motion.branchEnergy,
+                gestureVelocity: motion.gestureVelocity
             )
             let tuningBinding = Binding<MotionTuning>(
                 get: { motion.tuning },
@@ -24,7 +28,11 @@ struct PrototypeRootView: View {
                     parentAnchor: layout.parentAnchor,
                     leftAnchor: layout.leftAnchor,
                     rightAnchor: layout.rightAnchor,
-                    progress: layout.connectionProgress
+                    progress: layout.connectionProgress,
+                    phase: motion.phase,
+                    bias: motion.branchBias,
+                    energy: motion.branchEnergy,
+                    velocity: motion.gestureVelocity
                 )
 
                 LiquidPane(
@@ -43,7 +51,7 @@ struct PrototypeRootView: View {
                 .gesture(
                     DragGesture(minimumDistance: 2)
                         .onChanged { value in
-                            motion.updateGesture(translation: value.translation)
+                            motion.updateGesture(value: value)
                         }
                         .onEnded { _ in
                             motion.endGesture()
@@ -82,6 +90,7 @@ struct PrototypeRootView: View {
                     phase: motion.phase,
                     prepProgress: motion.prepProgress,
                     gestureThreshold: motion.tuning.gestureThreshold,
+                    velocity: motion.gestureVelocity,
                     onPrimary: {
                         if motion.isBranched {
                             motion.reset()
@@ -149,56 +158,102 @@ private struct PrototypeLayout {
 
     let connectionProgress: CGFloat
 
-    init(size: CGSize, prepProgress: CGFloat, splitProgress: CGFloat, settleProgress: CGFloat) {
+    init(
+        size: CGSize,
+        phase: BranchPhase,
+        prepProgress: CGFloat,
+        splitProgress: CGFloat,
+        settleProgress: CGFloat,
+        branchBias: CGFloat,
+        branchEnergy: CGFloat,
+        gestureVelocity: CGFloat
+    ) {
+        let prepCurve = Self.prepCurve(prepProgress)
+        let splitCurve = Self.smootherStep(splitProgress)
+        let settleCurve = Self.smootherStep(settleProgress)
+        let settleWave = sin(settleCurve * .pi * 2.4) * exp(-2.8 * settleCurve) * (0.09 + (branchEnergy * 0.12))
+        let settleLift = Self.clamped01(settleCurve + settleWave)
+        let dynamicEnergy = min(1, branchEnergy + (gestureVelocity * 0.35))
+
         let baseWidth = Self.clamped(size.width * 0.36, min: 360, max: 560)
         let baseHeight = Self.clamped(size.height * 0.34, min: 230, max: 340)
+        let splitEnergyBoost = 1 + (dynamicEnergy * 0.18)
 
-        let parentWidth = baseWidth * (1 + (0.14 * prepProgress) - (0.25 * splitProgress))
-        let parentHeight = baseHeight * (1 - (0.09 * prepProgress) - (0.2 * splitProgress))
+        let parentWidth = baseWidth * (1 + (0.16 * prepCurve) - (0.26 * splitCurve * splitEnergyBoost))
+        let parentHeight = baseHeight * (1 - (0.1 * prepCurve) - (0.18 * splitCurve))
         parentSize = CGSize(width: parentWidth, height: parentHeight)
 
         parentCenter = CGPoint(
             x: size.width * 0.5,
-            y: (size.height * 0.63) - (34 * prepProgress) - (20 * splitProgress)
+            y: (size.height * 0.63) - (38 * prepCurve) - (24 * splitCurve) - (6 * dynamicEnergy)
         )
         parentAnchor = CGPoint(
-            x: parentCenter.x,
-            y: parentCenter.y - (parentHeight * 0.2)
+            x: parentCenter.x + (branchBias * 18 * splitCurve),
+            y: parentCenter.y - (parentHeight * (0.2 + (0.05 * dynamicEnergy)))
         )
-        parentScale = 1 - (0.05 * splitProgress)
-        parentOpacity = 1 - (0.32 * splitProgress)
+        parentScale = 1 - (0.06 * splitCurve)
+        parentOpacity = 1 - (0.3 * splitCurve)
 
-        let horizontalSpread = (Self.clamped(size.width * 0.23, min: 190, max: 340) * splitProgress) + (36 * settleProgress)
-        let verticalRise = (baseHeight * 0.56 * splitProgress) + (26 * settleProgress)
-        let settleInset = (1 - settleProgress) * 34
+        let phaseBoost: CGFloat
+        switch phase {
+        case .gesturing:
+            phaseBoost = 0.94
+        case .splitting:
+            phaseBoost = 1.08
+        case .settling:
+            phaseBoost = 1.02
+        case .idle, .branched:
+            phaseBoost = 1
+        }
+
+        let horizontalSpread =
+            (Self.clamped(size.width * 0.23, min: 190, max: 340) * splitCurve * (1 + (0.22 * dynamicEnergy)) * phaseBoost) +
+            (38 * settleLift)
+        let verticalRise = (baseHeight * (0.58 + (0.08 * dynamicEnergy)) * splitCurve) + (28 * settleLift)
+        let settleInset = (1 - settleLift) * (34 + (18 * dynamicEnergy))
+        let biasOffset = branchBias * (42 * splitCurve + (26 * dynamicEnergy))
 
         leftCenter = CGPoint(
-            x: parentCenter.x - horizontalSpread + settleInset,
+            x: parentCenter.x - horizontalSpread + settleInset - biasOffset,
             y: parentCenter.y - verticalRise
         )
         rightCenter = CGPoint(
-            x: parentCenter.x + horizontalSpread - settleInset,
+            x: parentCenter.x + horizontalSpread - settleInset + biasOffset,
             y: parentCenter.y - verticalRise
         )
 
         childSize = CGSize(width: baseWidth * 0.62, height: baseHeight * 0.74)
-        childScale = 0.34 + (0.66 * splitProgress)
-        childOpacity = splitProgress
+        childScale = Self.clamped01(0.3 + (0.7 * splitCurve) + (0.06 * dynamicEnergy))
+        childOpacity = Self.clamped01(splitCurve + (gestureVelocity * 0.08))
 
         leftAnchor = CGPoint(
             x: leftCenter.x,
-            y: leftCenter.y + (childSize.height * 0.2 * childScale)
+            y: leftCenter.y + (childSize.height * 0.18 * childScale)
         )
         rightAnchor = CGPoint(
             x: rightCenter.x,
-            y: rightCenter.y + (childSize.height * 0.2 * childScale)
+            y: rightCenter.y + (childSize.height * 0.18 * childScale)
         )
 
-        connectionProgress = (0.25 * prepProgress) + (0.75 * splitProgress)
+        connectionProgress = Self.clamped01((0.25 * prepCurve) + (0.75 * splitCurve) + (gestureVelocity * 0.08))
     }
 
     private static func clamped(_ value: CGFloat, min: CGFloat, max: CGFloat) -> CGFloat {
         Swift.max(min, Swift.min(max, value))
+    }
+
+    private static func clamped01(_ value: CGFloat) -> CGFloat {
+        clamped(value, min: 0, max: 1)
+    }
+
+    private static func prepCurve(_ progress: CGFloat) -> CGFloat {
+        let t = clamped01(progress)
+        return 1 - pow(1 - t, 2.6)
+    }
+
+    private static func smootherStep(_ progress: CGFloat) -> CGFloat {
+        let t = clamped01(progress)
+        return t * t * t * (t * (t * 6 - 15) + 10)
     }
 }
 
@@ -232,10 +287,25 @@ private struct BirthConnectionLayer: View {
     let leftAnchor: CGPoint
     let rightAnchor: CGPoint
     let progress: CGFloat
+    let phase: BranchPhase
+    let bias: CGFloat
+    let energy: CGFloat
+    let velocity: CGFloat
 
     var body: some View {
+        let dynamicEnergy = min(1, energy + (velocity * 0.45))
+        let lineWidth = 3.6 + (dynamicEnergy * 2.2)
+        let opacityBoost = phase == .splitting ? 0.1 : 0
+
         ZStack {
-            branchPath(from: parentAnchor, to: leftAnchor)
+            branchPath(
+                from: parentAnchor,
+                to: leftAnchor,
+                side: -1,
+                bias: bias,
+                energy: dynamicEnergy,
+                progress: progress
+            )
                 .trim(from: 0, to: progress)
                 .stroke(
                     LinearGradient(
@@ -243,11 +313,18 @@ private struct BirthConnectionLayer: View {
                         startPoint: .top,
                         endPoint: .bottom
                     ),
-                    style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                 )
                 .blur(radius: 0.5)
 
-            branchPath(from: parentAnchor, to: rightAnchor)
+            branchPath(
+                from: parentAnchor,
+                to: rightAnchor,
+                side: 1,
+                bias: bias,
+                energy: dynamicEnergy,
+                progress: progress
+            )
                 .trim(from: 0, to: progress)
                 .stroke(
                     LinearGradient(
@@ -255,21 +332,33 @@ private struct BirthConnectionLayer: View {
                         startPoint: .top,
                         endPoint: .bottom
                     ),
-                    style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                 )
                 .blur(radius: 0.5)
         }
-        .opacity(progress)
+        .opacity(min(1, progress + opacityBoost))
     }
 
-    private func branchPath(from parent: CGPoint, to child: CGPoint) -> Path {
+    private func branchPath(
+        from parent: CGPoint,
+        to child: CGPoint,
+        side: CGFloat,
+        bias: CGFloat,
+        energy: CGFloat,
+        progress: CGFloat
+    ) -> Path {
         var path = Path()
-        let direction: CGFloat = child.x < parent.x ? -1 : 1
-        path.move(to: CGPoint(x: parent.x + (20 * direction), y: parent.y - 4))
+        let directionalBias = side * bias
+        let divergence = 78 + (92 * energy) - (20 * directionalBias)
+        let archLift = 24 + (58 * energy) + (18 * progress)
+        let childPull = 68 + (54 * energy) + (18 * directionalBias)
+        let startShift = (18 + (8 * energy) + (6 * directionalBias)) * side
+
+        path.move(to: CGPoint(x: parent.x + startShift, y: parent.y - (4 + (6 * energy))))
         path.addCurve(
             to: child,
-            control1: CGPoint(x: parent.x + (80 * direction), y: parent.y - 26),
-            control2: CGPoint(x: child.x - (70 * direction), y: child.y + 44)
+            control1: CGPoint(x: parent.x + (divergence * side), y: parent.y - archLift),
+            control2: CGPoint(x: child.x - (childPull * side), y: child.y + (42 + (32 * energy)))
         )
         return path
     }
@@ -389,6 +478,7 @@ private struct ControlDeck: View {
     let phase: BranchPhase
     let prepProgress: CGFloat
     let gestureThreshold: CGFloat
+    let velocity: CGFloat
     let onPrimary: () -> Void
     let onReplay: () -> Void
 
@@ -421,6 +511,13 @@ private struct ControlDeck: View {
                 .background(.white.opacity(0.1), in: Capsule())
 
             Text("Drag \u{2191} \(Int(prepProgress * 100))% / \(Int(gestureThreshold * 100))%")
+                .font(.subheadline.monospaced().weight(.regular))
+                .foregroundStyle(.white.opacity(0.82))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(.white.opacity(0.1), in: Capsule())
+
+            Text("Velocity \(Int(velocity * 100))%")
                 .font(.subheadline.monospaced().weight(.regular))
                 .foregroundStyle(.white.opacity(0.82))
                 .padding(.horizontal, 12)
@@ -498,6 +595,33 @@ private struct MotionTuningPanel: View {
                 ),
                 range: 120...320,
                 fractionDigits: 0
+            )
+            sliderRow(
+                "Velocity Scale",
+                value: Binding<Double>(
+                    get: { Double(tuning.velocityScale) },
+                    set: { tuning.velocityScale = CGFloat($0) }
+                ),
+                range: 80...300,
+                fractionDigits: 0
+            )
+            sliderRow(
+                "Velocity Influence",
+                value: Binding<Double>(
+                    get: { Double(tuning.velocityInfluence) },
+                    set: { tuning.velocityInfluence = CGFloat($0) }
+                ),
+                range: 0.2...1.2,
+                fractionDigits: 2
+            )
+            sliderRow(
+                "Bias Influence",
+                value: Binding<Double>(
+                    get: { Double(tuning.biasInfluence) },
+                    set: { tuning.biasInfluence = CGFloat($0) }
+                ),
+                range: 0.1...1,
+                fractionDigits: 2
             )
         }
         .padding(16)
