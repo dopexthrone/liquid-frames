@@ -24,3 +24,6 @@ swift test
 - Use the top-right motion tuning panel for presets, auto-adapt, and deep parameter calibration.
 - Drag speed and direction now deform branch curvature and split energy in real time.
 - Use the telemetry panel to inspect quality state, latest run phase timing, and run-history consistency.
+- Use `Run Benchmark` to generate deterministic profile quality scores and scenario breakdowns.
+- Workspace state now persists automatically to `~/Library/Application Support/liquid-frames/motion-workspace.json`.
+- Use telemetry actions to save, reload, or export workspace snapshots as JSON.

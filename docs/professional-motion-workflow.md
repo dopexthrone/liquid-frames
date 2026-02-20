@@ -14,8 +14,10 @@ Apply a preset first, then tune from there.
 
 1. Run 5-10 interactions using realistic drag styles.
 2. Watch the quality badge (`Healthy`, `Caution`, `Unstable`).
-3. Inspect latest run timing and recent-run consistency.
-4. Adjust one parameter group at a time:
+3. Run `Run Benchmark` to generate deterministic scenario scores.
+4. Inspect latest run timing and recent-run consistency.
+5. Check benchmark delta versus prior benchmark run.
+6. Adjust one parameter group at a time:
    - initiation feel: `gestureThreshold`, `pullDistance`
    - split feel: `splitStiffness`, `splitDamping`
    - settle feel: `settleStiffness`, `settleDamping`
@@ -26,15 +28,28 @@ Apply a preset first, then tune from there.
 - Enable auto-adapt during early tuning sprints to converge faster.
 - Disable auto-adapt when finalizing motion for a release candidate.
 - Clear run history before comparing two candidate profiles.
+- Clear benchmark history before benchmarking a new profile family.
 
-## 4) Reliability Targets
+## 4) Persist and Share Profiles
+
+- Workspace auto-saves to:
+  - `~/Library/Application Support/liquid-frames/motion-workspace.json`
+- Use telemetry buttons for explicit lifecycle:
+  - `Save`: force-write latest workspace state.
+  - `Reload`: restore latest saved snapshot.
+  - `Export JSON`: create timestamped snapshot for team review and build artifacts.
+- Include exported JSON in PRs when motion profiles are updated.
+
+## 5) Reliability Targets
 
 - Stable end-to-end branch transition timing across repeated runs.
 - No abrupt branch curvature jumps at high gesture velocity.
 - Consistent trigger behavior across iMac and MacBook window sizes.
 - Quality report should remain `Healthy` over repeated runs.
+- Benchmark grade target: `A` or `B` for release candidates.
+- Benchmark consistency score should remain high across iterations.
 
-## 5) Engineering Verification
+## 6) Engineering Verification
 
 Run these checks before shipping changes:
 
@@ -49,3 +64,5 @@ Focus of test suite:
 - signal-estimation behavior
 - adaptive behavior under slow timing
 - quality instability detection
+- deterministic benchmark scoring
+- snapshot persistence roundtrip

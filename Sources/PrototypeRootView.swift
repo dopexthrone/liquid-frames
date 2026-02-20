@@ -3,7 +3,6 @@ import SwiftUI
 struct PrototypeRootView: View {
     @StateObject private var motion = BranchMotionDirector()
     @State private var showsTuning = true
-    @State private var selectedPreset: MotionPreset = .balanced
 
     var body: some View {
         GeometryReader { proxy in
@@ -24,6 +23,10 @@ struct PrototypeRootView: View {
             let autoAdaptBinding = Binding<Bool>(
                 get: { motion.autoAdaptEnabled },
                 set: { motion.setAutoAdapt($0) }
+            )
+            let presetBinding = Binding<MotionPreset>(
+                get: { motion.selectedPreset },
+                set: { motion.selectPreset($0) }
             )
 
             ZStack {
@@ -132,11 +135,10 @@ struct PrototypeRootView: View {
                     if showsTuning {
                         MotionTuningPanel(
                             tuning: tuningBinding,
-                            selectedPreset: $selectedPreset,
+                            selectedPreset: presetBinding,
                             autoAdaptEnabled: autoAdaptBinding,
-                            onApplyPreset: { preset in
-                                selectedPreset = preset
-                                motion.applyPreset(preset)
+                            onApplyPreset: {
+                                motion.applySelectedPreset()
                             }
                         )
                         .transition(
@@ -150,7 +152,18 @@ struct PrototypeRootView: View {
                             quality: motion.qualityReport,
                             latestRun: motion.latestRun,
                             runs: Array(motion.runHistory.prefix(6)),
-                            onClearRuns: { motion.clearRunHistory() }
+                            benchmarkReport: motion.benchmarkReport,
+                            benchmarkHistory: Array(motion.benchmarkHistory.prefix(4)),
+                            persistenceStatus: motion.persistenceStatus,
+                            workspaceURL: motion.workspaceURL,
+                            onRunBenchmark: {
+                                motion.runBenchmarkSuite(recordHistory: true)
+                            },
+                            onClearRuns: { motion.clearRunHistory() },
+                            onClearBenchmarks: { motion.clearBenchmarkHistory() },
+                            onSaveWorkspace: { motion.saveWorkspaceNow() },
+                            onReloadWorkspace: { motion.reloadWorkspace() },
+                            onExportWorkspace: { motion.exportWorkspaceToDesktop() }
                         )
                         .transition(
                             .asymmetric(
@@ -573,7 +586,7 @@ private struct MotionTuningPanel: View {
     @Binding var tuning: MotionTuning
     @Binding var selectedPreset: MotionPreset
     @Binding var autoAdaptEnabled: Bool
-    let onApplyPreset: (MotionPreset) -> Void
+    let onApplyPreset: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -601,7 +614,7 @@ private struct MotionTuningPanel: View {
                 .pickerStyle(.segmented)
 
                 Button("Apply") {
-                    onApplyPreset(selectedPreset)
+                    onApplyPreset()
                 }
                 .buttonStyle(.bordered)
             }
@@ -754,7 +767,16 @@ private struct MotionTelemetryPanel: View {
     let quality: MotionQualityReport
     let latestRun: MotionRunMetrics?
     let runs: [MotionRunMetrics]
+    let benchmarkReport: MotionBenchmarkReport?
+    let benchmarkHistory: [MotionBenchmarkReport]
+    let persistenceStatus: String
+    let workspaceURL: URL
+    let onRunBenchmark: () -> Void
     let onClearRuns: () -> Void
+    let onClearBenchmarks: () -> Void
+    let onSaveWorkspace: () -> Void
+    let onReloadWorkspace: () -> Void
+    let onExportWorkspace: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -768,7 +790,9 @@ private struct MotionTelemetryPanel: View {
                         .foregroundStyle(.white.opacity(0.94))
                 }
                 Spacer(minLength: 0)
-                Button("Clear History", action: onClearRuns)
+                Button("Run Benchmark", action: onRunBenchmark)
+                    .buttonStyle(.borderedProminent)
+                Button("Clear Runs", action: onClearRuns)
                     .buttonStyle(.bordered)
             }
 
@@ -776,6 +800,57 @@ private struct MotionTelemetryPanel: View {
                 Text(message)
                     .font(.footnote.weight(.regular))
                     .foregroundStyle(.white.opacity(0.78))
+            }
+
+            if let benchmarkReport {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Benchmark \(benchmarkReport.grade.rawValue)")
+                            .font(.subheadline.monospaced().weight(.regular))
+                            .foregroundStyle(benchmarkReport.grade.color.opacity(0.94))
+                        Text(
+                            "\(Int(benchmarkReport.overallScore)) / \(Int(benchmarkReport.consistencyScore))"
+                        )
+                        .font(.subheadline.monospaced().weight(.regular))
+                        .foregroundStyle(.white.opacity(0.84))
+                        Spacer(minLength: 0)
+                        Button("Clear Bench", action: onClearBenchmarks)
+                            .buttonStyle(.bordered)
+                    }
+
+                    ForEach(benchmarkReport.scenarios.prefix(4)) { scenario in
+                        HStack {
+                            Text(scenario.scenarioName)
+                                .font(.caption.weight(.regular))
+                                .foregroundStyle(.white.opacity(0.8))
+                            Spacer(minLength: 0)
+                            Text("\(Int(scenario.score))")
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.92))
+                            Text("pts")
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(.white.opacity(0.68))
+                            Text(
+                                "\(scenario.estimatedDuration, format: .number.precision(.fractionLength(2)))s"
+                            )
+                            .font(.caption.monospaced().weight(.regular))
+                            .foregroundStyle(.white.opacity(0.75))
+                        }
+                    }
+
+                    if let previous = benchmarkHistory.dropFirst().first {
+                        let delta = benchmarkReport.overallScore - previous.overallScore
+                        HStack(spacing: 6) {
+                            Text("Benchmark Delta")
+                                .font(.caption.weight(.regular))
+                                .foregroundStyle(.white.opacity(0.74))
+                            Text(delta, format: .number.precision(.fractionLength(1)))
+                                .font(.caption.monospaced().weight(.regular))
+                                .foregroundStyle(delta >= 0 ? .mint.opacity(0.9) : .orange.opacity(0.9))
+                        }
+                    }
+                }
+                .padding(.top, 4)
             }
 
             if let latestRun {
@@ -820,6 +895,29 @@ private struct MotionTelemetryPanel: View {
                     }
                 }
             }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Workspace")
+                    .font(.subheadline.weight(.regular))
+                    .foregroundStyle(.white.opacity(0.92))
+                Text(persistenceStatus)
+                    .font(.caption.monospaced().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.82))
+                Text(workspaceURL.path)
+                    .font(.caption.monospaced().weight(.regular))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(2)
+
+                HStack(spacing: 8) {
+                    Button("Save", action: onSaveWorkspace)
+                        .buttonStyle(.bordered)
+                    Button("Reload", action: onReloadWorkspace)
+                        .buttonStyle(.bordered)
+                    Button("Export JSON", action: onExportWorkspace)
+                        .buttonStyle(.bordered)
+                }
+            }
+            .padding(.top, 2)
         }
         .padding(16)
         .frame(width: 360)
@@ -879,6 +977,21 @@ private extension MotionQualityLevel {
             "Caution"
         case .unstable:
             "Unstable"
+        }
+    }
+}
+
+private extension MotionBenchmarkGrade {
+    var color: Color {
+        switch self {
+        case .a:
+            .mint
+        case .b:
+            .cyan
+        case .c:
+            .orange
+        case .d:
+            .red
         }
     }
 }

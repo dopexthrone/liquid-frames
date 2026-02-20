@@ -19,19 +19,34 @@ final class BranchMotionDirector: ObservableObject {
     @Published private(set) var gestureVelocity: CGFloat = 0
     @Published private(set) var branchBias: CGFloat = 0
     @Published private(set) var branchEnergy: CGFloat = 0
+    @Published private(set) var selectedPreset: MotionPreset = .balanced
     @Published private(set) var tuning: MotionTuning = MotionPreset.balanced.tuning
     @Published private(set) var runHistory: [MotionRunMetrics] = []
     @Published private(set) var qualityReport = MotionQualityReport(
         level: .healthy,
         messages: ["Motion profile is within target reliability bounds."]
     )
+    @Published private(set) var benchmarkReport: MotionBenchmarkReport?
+    @Published private(set) var benchmarkHistory: [MotionBenchmarkReport] = []
+    @Published private(set) var workspaceURL: URL = MotionStorage.defaultWorkspaceURL()
+    @Published private(set) var persistenceStatus: String = "No workspace saved yet."
     @Published var autoAdaptEnabled = true {
-        didSet { refreshQualityReport() }
+        didSet {
+            refreshQualityReport()
+            queuePersistenceWrite()
+        }
     }
 
     private var sequenceTask: Task<Void, Never>?
+    private var persistenceTask: Task<Void, Never>?
     private var pendingPeaks = MotionPeaks()
     private var inFlightRun: InFlightRun?
+
+    init() {
+        loadWorkspace(initialLoad: true)
+        refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+    }
 
     var canBranch: Bool {
         phase == .idle
@@ -110,13 +125,28 @@ final class BranchMotionDirector: ObservableObject {
         phase = .idle
     }
 
+    func selectPreset(_ preset: MotionPreset) {
+        selectedPreset = preset
+        queuePersistenceWrite()
+    }
+
+    func applySelectedPreset() {
+        applyPreset(selectedPreset)
+    }
+
     func updateTuning(_ candidate: MotionTuning) {
         tuning = candidate.normalized()
         refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        queuePersistenceWrite()
     }
 
     func applyPreset(_ preset: MotionPreset) {
-        updateTuning(preset.tuning)
+        selectedPreset = preset
+        tuning = preset.tuning.normalized()
+        refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        queuePersistenceWrite()
     }
 
     func setAutoAdapt(_ enabled: Bool) {
@@ -126,6 +156,50 @@ final class BranchMotionDirector: ObservableObject {
     func clearRunHistory() {
         runHistory.removeAll()
         refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        queuePersistenceWrite()
+    }
+
+    func clearBenchmarkHistory() {
+        benchmarkHistory.removeAll()
+    }
+
+    func runBenchmarkSuite(recordHistory: Bool = true) {
+        let report = MotionBenchmarkEngine.runSuite(tuning: tuning)
+        benchmarkReport = report
+        if recordHistory {
+            benchmarkHistory.insert(report, at: 0)
+            if benchmarkHistory.count > 24 {
+                benchmarkHistory.removeLast(benchmarkHistory.count - 24)
+            }
+        }
+    }
+
+    func saveWorkspaceNow() {
+        persistenceTask?.cancel()
+        do {
+            let snapshot = makeWorkspaceSnapshot()
+            _ = try MotionStorage.save(snapshot: snapshot, to: workspaceURL)
+            persistenceStatus = "Saved \(Self.timeFormatter.string(from: Date()))"
+        } catch {
+            persistenceStatus = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    func reloadWorkspace() {
+        loadWorkspace(initialLoad: false)
+        runBenchmarkSuite(recordHistory: false)
+    }
+
+    func exportWorkspaceToDesktop() {
+        do {
+            let snapshot = makeWorkspaceSnapshot()
+            let exportURL = MotionStorage.desktopExportURL()
+            _ = try MotionStorage.save(snapshot: snapshot, to: exportURL)
+            persistenceStatus = "Exported \(exportURL.lastPathComponent)"
+        } catch {
+            persistenceStatus = "Export failed: \(error.localizedDescription)"
+        }
     }
 
     func reset() {
@@ -268,12 +342,62 @@ final class BranchMotionDirector: ObservableObject {
         }
 
         refreshQualityReport()
+        runBenchmarkSuite(recordHistory: false)
+        queuePersistenceWrite()
         inFlightRun = nil
         pendingPeaks.reset()
     }
 
     private func refreshQualityReport() {
         qualityReport = MotionQualityEvaluator.evaluate(tuning: tuning, recentRuns: runHistory)
+    }
+
+    private func makeWorkspaceSnapshot() -> MotionWorkspaceSnapshot {
+        MotionWorkspaceSnapshot(
+            selectedPresetRawValue: selectedPreset.rawValue,
+            autoAdaptEnabled: autoAdaptEnabled,
+            tuning: MotionTuningRecord(tuning: tuning),
+            runHistory: runHistory.map(MotionRunRecord.init(metrics:)),
+            savedAt: Date()
+        )
+    }
+
+    private func applyWorkspaceSnapshot(_ snapshot: MotionWorkspaceSnapshot) {
+        selectedPreset = MotionPreset(rawValue: snapshot.selectedPresetRawValue) ?? .balanced
+        autoAdaptEnabled = snapshot.autoAdaptEnabled
+        tuning = snapshot.tuning.tuning.normalized()
+        runHistory = snapshot.runHistory.map(\.metrics)
+            .sorted(by: { $0.timestamp > $1.timestamp })
+        if runHistory.count > 40 {
+            runHistory.removeLast(runHistory.count - 40)
+        }
+        persistenceStatus = "Loaded \(Self.timeFormatter.string(from: snapshot.savedAt))"
+    }
+
+    private func loadWorkspace(initialLoad: Bool) {
+        do {
+            let snapshot = try MotionStorage.load(from: workspaceURL)
+            applyWorkspaceSnapshot(snapshot)
+        } catch MotionStorageError.snapshotNotFound {
+            if initialLoad {
+                persistenceStatus = "No saved workspace found at \(workspaceURL.path)"
+                queuePersistenceWrite()
+            } else {
+                persistenceStatus = "Workspace file not found."
+            }
+        } catch {
+            persistenceStatus = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func queuePersistenceWrite() {
+        persistenceTask?.cancel()
+        let snapshot = makeWorkspaceSnapshot()
+        let targetURL = workspaceURL
+        persistenceTask = Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 360_000_000)
+            _ = try? MotionStorage.save(snapshot: snapshot, to: targetURL)
+        }
     }
 
     private func mutateRun(_ body: (inout InFlightRun) -> Void) {
@@ -292,8 +416,16 @@ final class BranchMotionDirector: ObservableObject {
         try? await Task.sleep(nanoseconds: nanos)
     }
 
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .medium
+        formatter.dateStyle = .none
+        return formatter
+    }()
+
     deinit {
         sequenceTask?.cancel()
+        persistenceTask?.cancel()
     }
 }
 

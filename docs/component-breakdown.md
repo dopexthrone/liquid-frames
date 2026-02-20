@@ -42,8 +42,15 @@
 - Implements `GestureSignalEstimator` so gesture parsing is deterministic and testable.
 - Implements `MotionQualityEvaluator` for reliability scoring.
 - Implements `MotionAdaptiveEngine` for continuously self-improving profile adjustments.
+- Implements snapshot models for persistence/export and benchmark models for deterministic scoring.
 
-## 5) `PrototypeLayout` (Adaptive Layout Engine)
+## 5) `MotionStorage` (Workspace Persistence)
+
+- Saves and loads workspace snapshots as JSON.
+- Uses default location: `~/Library/Application Support/liquid-frames/motion-workspace.json`.
+- Supports explicit export snapshots for team sharing and build archives.
+
+## 6) `PrototypeLayout` (Adaptive Layout Engine)
 
 - Converts window size + motion progress into:
   - pane sizes
@@ -52,38 +59,41 @@
   - opacity/scale transforms
 - Keeps the motion legible across iMac and MacBook-style aspect ratios.
 
-## 6) `LiquidPane` (Glass Card Primitive)
+## 7) `LiquidPane` (Glass Card Primitive)
 
 - Shared pane UI primitive for parent/children.
 - Uses material-backed surfaces, soft highlight gradients, and open-top stroke option.
 - Encodes readable information density without breaking visual hierarchy.
 
-## 7) `BirthConnectionLayer` (Liquid Branch Strokes)
+## 8) `BirthConnectionLayer` (Liquid Branch Strokes)
 
 - Draws two curved paths that emerge from the parent and connect to children.
 - Uses progressive trim and glow-stroke styling to sell “birth” continuity.
 - Deforms branch curvature and line energy in response to drag velocity and directional bias.
 
-## 8) `ControlDeck` (Interaction Controls)
+## 9) `ControlDeck` (Interaction Controls)
 
 - Primary action toggles between branch and reset.
 - Replay action re-runs the full sequence.
 - Surfaces current phase, live drag threshold progress, and current quality state.
 
-## 9) `MotionTuningPanel` (Live Calibration)
+## 10) `MotionTuningPanel` (Live Calibration)
 
 - Exposes presets, auto-adapt toggle, spring/delay values, and gesture shaping values.
 - Enables rapid calibration of "birth" feel during demo iteration.
 
-## 10) `MotionTelemetryPanel` (Reliability Feedback)
+## 11) `MotionTelemetryPanel` (Reliability Feedback)
 
 - Displays quality report with warnings from the evaluator.
 - Displays latest run phase timing breakdown and recent-run summary rows.
-- Supports clearing run history to restart a calibration session.
+- Displays deterministic benchmark report/grade and benchmark deltas.
+- Supports run/benchmark clearing and workspace save/reload/export controls.
 
-## 11) `Tests/liquid-framesTests/MotionIntelligenceTests.swift` (Verification)
+## 12) `Tests/liquid-framesTests/MotionIntelligenceTests.swift` (Verification)
 
 - Validates tuning range normalization.
 - Validates gesture signal response behavior.
 - Validates adaptive engine behavior for slow runs.
 - Validates quality evaluator instability detection.
+- Validates benchmark determinism for fixed profiles.
+- Validates workspace snapshot save/load roundtrip.

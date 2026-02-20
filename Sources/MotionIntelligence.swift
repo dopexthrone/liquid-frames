@@ -51,7 +51,7 @@ struct MotionTuning: Equatable {
     }
 }
 
-enum MotionPreset: String, CaseIterable, Identifiable {
+enum MotionPreset: String, CaseIterable, Identifiable, Codable {
     case balanced
     case responsive
     case cinematic
@@ -109,13 +109,13 @@ enum MotionPreset: String, CaseIterable, Identifiable {
     }
 }
 
-enum MotionTrigger: String {
+enum MotionTrigger: String, Codable {
     case gesture
     case button
     case replay
 }
 
-struct MotionPhaseDurations: Equatable {
+struct MotionPhaseDurations: Equatable, Codable {
     let preSplit: Double
     let preSettle: Double
     let settleTail: Double
@@ -139,7 +139,7 @@ struct MotionRunMetrics: Identifiable, Equatable {
     }
 }
 
-enum MotionQualityLevel: String {
+enum MotionQualityLevel: String, Codable {
     case healthy
     case caution
     case unstable
@@ -248,6 +248,263 @@ enum MotionAdaptiveEngine {
     }
 }
 
+struct MotionWorkspaceSnapshot: Codable, Equatable {
+    var schemaVersion: Int = 1
+    var selectedPresetRawValue: String
+    var autoAdaptEnabled: Bool
+    var tuning: MotionTuningRecord
+    var runHistory: [MotionRunRecord]
+    var savedAt: Date
+}
+
+struct MotionTuningRecord: Codable, Equatable {
+    var splitStiffness: Double
+    var splitDamping: Double
+    var settleStiffness: Double
+    var settleDamping: Double
+    var preSplitDelay: Double
+    var gestureCommitDelay: Double
+    var preSettleDelay: Double
+    var postSettleDelay: Double
+    var gestureThreshold: Double
+    var pullDistance: Double
+    var velocityScale: Double
+    var velocityInfluence: Double
+    var biasInfluence: Double
+
+    init(tuning: MotionTuning) {
+        splitStiffness = tuning.splitStiffness
+        splitDamping = tuning.splitDamping
+        settleStiffness = tuning.settleStiffness
+        settleDamping = tuning.settleDamping
+        preSplitDelay = tuning.preSplitDelay
+        gestureCommitDelay = tuning.gestureCommitDelay
+        preSettleDelay = tuning.preSettleDelay
+        postSettleDelay = tuning.postSettleDelay
+        gestureThreshold = Double(tuning.gestureThreshold)
+        pullDistance = Double(tuning.pullDistance)
+        velocityScale = Double(tuning.velocityScale)
+        velocityInfluence = Double(tuning.velocityInfluence)
+        biasInfluence = Double(tuning.biasInfluence)
+    }
+
+    var tuning: MotionTuning {
+        MotionTuning(
+            splitStiffness: splitStiffness,
+            splitDamping: splitDamping,
+            settleStiffness: settleStiffness,
+            settleDamping: settleDamping,
+            preSplitDelay: preSplitDelay,
+            gestureCommitDelay: gestureCommitDelay,
+            preSettleDelay: preSettleDelay,
+            postSettleDelay: postSettleDelay,
+            gestureThreshold: CGFloat(gestureThreshold),
+            pullDistance: CGFloat(pullDistance),
+            velocityScale: CGFloat(velocityScale),
+            velocityInfluence: CGFloat(velocityInfluence),
+            biasInfluence: CGFloat(biasInfluence)
+        )
+    }
+}
+
+struct MotionRunRecord: Codable, Equatable {
+    var timestamp: Date
+    var triggerRawValue: String
+    var prepPeak: Double
+    var velocityPeak: Double
+    var biasPeak: Double
+    var preSplit: Double
+    var preSettle: Double
+    var settleTail: Double
+
+    init(metrics: MotionRunMetrics) {
+        timestamp = metrics.timestamp
+        triggerRawValue = metrics.trigger.rawValue
+        prepPeak = Double(metrics.prepPeak)
+        velocityPeak = Double(metrics.velocityPeak)
+        biasPeak = Double(metrics.biasPeak)
+        preSplit = metrics.phases.preSplit
+        preSettle = metrics.phases.preSettle
+        settleTail = metrics.phases.settleTail
+    }
+
+    var metrics: MotionRunMetrics {
+        MotionRunMetrics(
+            timestamp: timestamp,
+            trigger: MotionTrigger(rawValue: triggerRawValue) ?? .button,
+            prepPeak: CGFloat(prepPeak),
+            velocityPeak: CGFloat(velocityPeak),
+            biasPeak: CGFloat(biasPeak),
+            phases: MotionPhaseDurations(
+                preSplit: preSplit,
+                preSettle: preSettle,
+                settleTail: settleTail
+            )
+        )
+    }
+}
+
+enum MotionBenchmarkGrade: String, Codable {
+    case a = "A"
+    case b = "B"
+    case c = "C"
+    case d = "D"
+}
+
+struct MotionBenchmarkScenarioResult: Equatable, Identifiable {
+    let scenarioName: String
+    let trigger: MotionTrigger
+    let estimatedDuration: Double
+    let responsiveness: Double
+    let stability: Double
+    let score: Double
+
+    var id: String {
+        scenarioName
+    }
+}
+
+struct MotionBenchmarkReport: Equatable, Identifiable {
+    let generatedAt: Date
+    let overallScore: Double
+    let consistencyScore: Double
+    let grade: MotionBenchmarkGrade
+    let scenarios: [MotionBenchmarkScenarioResult]
+    let quality: MotionQualityReport
+
+    var id: Date {
+        generatedAt
+    }
+}
+
+enum MotionBenchmarkEngine {
+    static func runSuite(tuning: MotionTuning) -> MotionBenchmarkReport {
+        let normalized = tuning.normalized()
+        let scenarios = benchmarkSamples().map { sample in
+            buildScenarioResult(sample: sample, tuning: normalized)
+        }
+
+        let overall = scenarios.map(\.score).average
+        let durationDeviation = scenarios.map(\.estimatedDuration).standardDeviation
+        let consistency = (1 - (durationDeviation / 0.38)).clamped(to: 0...1) * 100
+
+        let syntheticRuns = scenarios.map { scenario in
+            MotionRunMetrics(
+                timestamp: Date(),
+                trigger: scenario.trigger,
+                prepPeak: 1,
+                velocityPeak: CGFloat(0.35 + (scenario.responsiveness * 0.5)),
+                biasPeak: 0,
+                phases: MotionPhaseDurations(
+                    preSplit: scenario.estimatedDuration * 0.28,
+                    preSettle: scenario.estimatedDuration * 0.44,
+                    settleTail: scenario.estimatedDuration * 0.28
+                )
+            )
+        }
+
+        let quality = MotionQualityEvaluator.evaluate(tuning: normalized, recentRuns: syntheticRuns)
+        let combinedScore = ((overall * 0.75) + (consistency * 0.25)).clamped(to: 0...100)
+        let grade: MotionBenchmarkGrade
+        switch combinedScore {
+        case 88...:
+            grade = .a
+        case 75..<88:
+            grade = .b
+        case 62..<75:
+            grade = .c
+        default:
+            grade = .d
+        }
+
+        return MotionBenchmarkReport(
+            generatedAt: Date(),
+            overallScore: combinedScore,
+            consistencyScore: consistency,
+            grade: grade,
+            scenarios: scenarios,
+            quality: quality
+        )
+    }
+
+    private static func buildScenarioResult(
+        sample: MotionBenchmarkSample,
+        tuning: MotionTuning
+    ) -> MotionBenchmarkScenarioResult {
+        let signal = GestureSignalEstimator.estimate(
+            input: GestureSignalInput(
+                translation: sample.translation,
+                predictedEndTranslation: sample.predictedEndTranslation,
+                tuning: tuning
+            )
+        )
+
+        let splitResponse = (165 / tuning.splitStiffness) + (tuning.splitDamping / 118)
+        let settleResponse = (180 / tuning.settleStiffness) + (tuning.settleDamping / 108)
+        let baseDuration = tuning.preSplitDelay + tuning.preSettleDelay + tuning.postSettleDelay
+        let gestureReadiness = max(0.78, Double(signal.prepProgress) + 0.22)
+        let totalDuration = (baseDuration + splitResponse + settleResponse) / gestureReadiness
+
+        let targetDuration = sample.targetDuration
+        let responsiveness = (1 - abs(totalDuration - targetDuration) / targetDuration).clamped(to: 0...1)
+        let springRatio = tuning.splitStiffness / max(1, tuning.splitDamping)
+        let ratioStability = (1 - abs(springRatio - 8.2) / 8.2).clamped(to: 0...1)
+        let velocityPenalty = max(0, Double(tuning.velocityInfluence - 0.9) * 0.42)
+        let stability = (ratioStability - velocityPenalty).clamped(to: 0...1)
+
+        let score = ((responsiveness * 0.56) + (stability * 0.44)) * 100
+        return MotionBenchmarkScenarioResult(
+            scenarioName: sample.name,
+            trigger: sample.trigger,
+            estimatedDuration: totalDuration,
+            responsiveness: responsiveness,
+            stability: stability,
+            score: score.clamped(to: 0...100)
+        )
+    }
+
+    private static func benchmarkSamples() -> [MotionBenchmarkSample] {
+        [
+            MotionBenchmarkSample(
+                name: "Gentle Gesture",
+                trigger: .gesture,
+                translation: CGSize(width: 8, height: -160),
+                predictedEndTranslation: CGSize(width: 24, height: -210),
+                targetDuration: 1.42
+            ),
+            MotionBenchmarkSample(
+                name: "Assertive Gesture",
+                trigger: .gesture,
+                translation: CGSize(width: 0, height: -250),
+                predictedEndTranslation: CGSize(width: 10, height: -340),
+                targetDuration: 1.24
+            ),
+            MotionBenchmarkSample(
+                name: "Lateral Bias Gesture",
+                trigger: .gesture,
+                translation: CGSize(width: 120, height: -210),
+                predictedEndTranslation: CGSize(width: 168, height: -270),
+                targetDuration: 1.34
+            ),
+            MotionBenchmarkSample(
+                name: "Button Trigger",
+                trigger: .button,
+                translation: CGSize(width: 0, height: -220),
+                predictedEndTranslation: CGSize(width: 0, height: -220),
+                targetDuration: 1.33
+            )
+        ]
+    }
+}
+
+private struct MotionBenchmarkSample {
+    let name: String
+    let trigger: MotionTrigger
+    let translation: CGSize
+    let predictedEndTranslation: CGSize
+    let targetDuration: Double
+}
+
 struct GestureSignalInput {
     let translation: CGSize
     let predictedEndTranslation: CGSize
@@ -299,5 +556,19 @@ private extension Double {
 private extension CGFloat {
     func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
         Swift.max(range.lowerBound, Swift.min(range.upperBound, self))
+    }
+}
+
+private extension Array where Element == Double {
+    var average: Double {
+        guard !isEmpty else { return 0 }
+        return reduce(0, +) / Double(count)
+    }
+
+    var standardDeviation: Double {
+        guard count > 1 else { return 0 }
+        let mean = average
+        let variance = map { pow($0 - mean, 2) }.reduce(0, +) / Double(count)
+        return sqrt(variance)
     }
 }

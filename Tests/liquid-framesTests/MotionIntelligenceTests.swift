@@ -89,6 +89,42 @@ func qualityEvaluatorFlagsUnstableRuns() {
     #expect(!report.messages.isEmpty)
 }
 
+@Test
+func benchmarkSuiteIsDeterministicForSameTuning() {
+    let tuning = MotionPreset.responsive.tuning
+    let a = MotionBenchmarkEngine.runSuite(tuning: tuning)
+    let b = MotionBenchmarkEngine.runSuite(tuning: tuning)
+
+    #expect(a.grade == b.grade)
+    #expect(abs(a.overallScore - b.overallScore) < 0.0001)
+    #expect(abs(a.consistencyScore - b.consistencyScore) < 0.0001)
+    #expect(a.scenarios.map(\.score) == b.scenarios.map(\.score))
+}
+
+@Test
+func workspaceSnapshotRoundTripPersistsCoreState() throws {
+    let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("liquid-frames-tests", isDirectory: true)
+        .appendingPathComponent(UUID().uuidString + ".json", isDirectory: false)
+
+    let snapshot = MotionWorkspaceSnapshot(
+        selectedPresetRawValue: MotionPreset.cinematic.rawValue,
+        autoAdaptEnabled: false,
+        tuning: MotionTuningRecord(tuning: MotionPreset.cinematic.tuning),
+        runHistory: [MotionRunRecord(metrics: sampleRun(duration: 1.41))],
+        savedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+
+    _ = try MotionStorage.save(snapshot: snapshot, to: tempURL)
+    let loaded = try MotionStorage.load(from: tempURL)
+
+    #expect(loaded.selectedPresetRawValue == snapshot.selectedPresetRawValue)
+    #expect(loaded.autoAdaptEnabled == snapshot.autoAdaptEnabled)
+    #expect(loaded.tuning == snapshot.tuning)
+    #expect(loaded.runHistory.count == 1)
+    #expect(loaded.runHistory.first?.triggerRawValue == MotionTrigger.button.rawValue)
+}
+
 private func sampleRun(duration: Double) -> MotionRunMetrics {
     MotionRunMetrics(
         timestamp: Date(),
