@@ -25,6 +25,9 @@ final class BranchMotionDirector: ObservableObject {
     @Published private(set) var profiles: [MotionProfile] = []
     @Published private(set) var activeProfileID: UUID?
     @Published private(set) var profileIsDirty = false
+    @Published private(set) var profileDraftName: String = ""
+    @Published private(set) var profileDraftNotes: String = ""
+    @Published private(set) var profileDraftTags: String = ""
 
     @Published private(set) var runHistory: [MotionRunMetrics] = []
     @Published private(set) var qualityReport = MotionQualityReport(
@@ -170,10 +173,29 @@ final class BranchMotionDirector: ObservableObject {
         autoAdaptEnabled = enabled
     }
 
+    func updateProfileDraftName(_ value: String) {
+        profileDraftName = value
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func updateProfileDraftNotes(_ value: String) {
+        profileDraftNotes = value
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
+    func updateProfileDraftTags(_ value: String) {
+        profileDraftTags = value
+        refreshProfileDirtyFlag()
+        queuePersistenceWrite()
+    }
+
     func selectActiveProfile(id: UUID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
         activeProfileID = profile.id
         tuning = profile.tuning.normalized()
+        syncDrafts(with: profile)
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
         refreshProfileDirtyFlag()
@@ -184,8 +206,9 @@ final class BranchMotionDirector: ObservableObject {
         let now = Date()
         let profile = MotionProfile(
             id: UUID(),
-            name: "Profile \(profiles.count + 1)",
-            notes: "Created from current tuning.",
+            name: MotionProfile.normalizedName("Profile \(profiles.count + 1)"),
+            notes: MotionProfile.normalizedNotes("Created from current tuning."),
+            tags: [],
             tuning: tuning.normalized(),
             baseline: benchmarkReport.map(MotionBenchmarkBaseline.init(report:)),
             createdAt: now,
@@ -193,6 +216,7 @@ final class BranchMotionDirector: ObservableObject {
         )
         profiles.insert(profile, at: 0)
         activeProfileID = profile.id
+        syncDrafts(with: profile)
         refreshProfileDirtyFlag()
         queuePersistenceWrite()
     }
@@ -202,8 +226,9 @@ final class BranchMotionDirector: ObservableObject {
         let now = Date()
         let profile = MotionProfile(
             id: UUID(),
-            name: "\(active.name) Copy",
-            notes: active.notes,
+            name: MotionProfile.normalizedName("\(active.name) Copy"),
+            notes: MotionProfile.normalizedNotes(active.notes),
+            tags: MotionProfile.normalizedTags(active.tags),
             tuning: active.tuning,
             baseline: active.baseline,
             createdAt: now,
@@ -211,6 +236,7 @@ final class BranchMotionDirector: ObservableObject {
         )
         profiles.insert(profile, at: 0)
         activeProfileID = profile.id
+        syncDrafts(with: profile)
         refreshProfileDirtyFlag()
         queuePersistenceWrite()
     }
@@ -225,6 +251,9 @@ final class BranchMotionDirector: ObservableObject {
         activeProfileID = profiles.first?.id
         if let profile = activeProfile {
             tuning = profile.tuning.normalized()
+            syncDrafts(with: profile)
+        } else {
+            clearDrafts()
         }
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
@@ -234,8 +263,13 @@ final class BranchMotionDirector: ObservableObject {
 
     func saveCurrentToActiveProfile() {
         guard let activeID = activeProfileID, let index = profiles.firstIndex(where: { $0.id == activeID }) else { return }
+        profiles[index].name = MotionProfile.normalizedName(profileDraftName)
+        profiles[index].notes = MotionProfile.normalizedNotes(profileDraftNotes)
+        profiles[index].tags = MotionProfile.normalizedTagsCSV(profileDraftTags)
         profiles[index].tuning = tuning.normalized()
         profiles[index].updatedAt = Date()
+        tuning = profiles[index].tuning
+        syncDrafts(with: profiles[index])
         refreshProfileDirtyFlag()
         queuePersistenceWrite()
     }
@@ -243,6 +277,7 @@ final class BranchMotionDirector: ObservableObject {
     func revertFromActiveProfile() {
         guard let profile = activeProfile else { return }
         tuning = profile.tuning.normalized()
+        syncDrafts(with: profile)
         refreshQualityReport()
         runBenchmarkSuite(recordHistory: false)
         refreshProfileDirtyFlag()
@@ -319,6 +354,55 @@ final class BranchMotionDirector: ObservableObject {
             persistenceStatus = "Exported \(exportURL.lastPathComponent)"
         } catch {
             persistenceStatus = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    func importLatestDesktopExport() {
+        do {
+            let imported = try MotionStorage.loadLatestDesktopExport()
+            let merged = MotionWorkspaceMerger.merge(
+                current: makeWorkspaceSnapshot(),
+                incoming: imported.snapshot
+            )
+            applyWorkspaceSnapshot(merged)
+            ensureProfileLibraryIntegrity()
+            refreshQualityReport()
+            runBenchmarkSuite(recordHistory: false)
+            refreshProfileDirtyFlag()
+            queuePersistenceWrite()
+            persistenceStatus = "Imported \(imported.url.lastPathComponent)"
+        } catch MotionStorageError.desktopExportNotFound(let desktopURL) {
+            persistenceStatus = "No desktop export found in \(desktopURL.path)"
+        } catch {
+            persistenceStatus = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    func exportReleaseGateReportToDesktop() {
+        guard let profile = activeProfile else {
+            persistenceStatus = "No active profile available for release report."
+            return
+        }
+
+        let report = MotionReleaseGateReport(
+            generatedAt: Date(),
+            workspacePath: workspaceURL.path,
+            profile: profile,
+            profileIsDirty: profileIsDirty,
+            quality: qualityReport,
+            benchmark: benchmarkReport,
+            regression: benchmarkRegression,
+            latestRun: latestRun,
+            runCount: runHistory.count,
+            benchmarkHistoryCount: benchmarkHistory.count
+        )
+
+        do {
+            let reportURL = MotionStorage.desktopReleaseGateURL()
+            _ = try MotionStorage.save(text: report.markdown, to: reportURL)
+            persistenceStatus = "Exported \(reportURL.lastPathComponent)"
+        } catch {
+            persistenceStatus = "Release report export failed: \(error.localizedDescription)"
         }
     }
 
@@ -491,7 +575,13 @@ final class BranchMotionDirector: ObservableObject {
             profileIsDirty = false
             return
         }
-        profileIsDirty = profile.tuning.normalized() != tuning.normalized()
+        let tuningDirty = profile.tuning.normalized() != tuning.normalized()
+        let metadataDirty = !profile.metadataMatchesDraft(
+            name: profileDraftName,
+            notes: profileDraftNotes,
+            tags: MotionProfile.normalizedTagsCSV(profileDraftTags)
+        )
+        profileIsDirty = tuningDirty || metadataDirty
     }
 
     private func ensureProfileLibraryIntegrity() {
@@ -501,6 +591,7 @@ final class BranchMotionDirector: ObservableObject {
                 id: UUID(),
                 name: "Default",
                 notes: "Auto-generated profile.",
+                tags: ["default"],
                 tuning: tuning.normalized(),
                 baseline: nil,
                 createdAt: now,
@@ -508,14 +599,25 @@ final class BranchMotionDirector: ObservableObject {
             )
             profiles = [profile]
             activeProfileID = profile.id
+            syncDrafts(with: profile)
             profileIsDirty = false
             return
         }
 
         if let activeID = activeProfileID, profiles.contains(where: { $0.id == activeID }) {
+            if let profile = activeProfile {
+                syncDrafts(with: profile)
+            } else {
+                clearDrafts()
+            }
             refreshProfileDirtyFlag()
         } else {
             activeProfileID = profiles.first?.id
+            if let profile = activeProfile {
+                syncDrafts(with: profile)
+            } else {
+                clearDrafts()
+            }
             refreshProfileDirtyFlag()
         }
     }
@@ -545,12 +647,19 @@ final class BranchMotionDirector: ObservableObject {
         }
 
         profiles = snapshot.profiles.map(\.profile)
+            .map { $0.withNormalizedMetadata() }
             .sorted(by: { $0.updatedAt > $1.updatedAt })
         activeProfileID = snapshot.activeProfileID.flatMap(UUID.init(uuidString:))
 
         benchmarkHistory = snapshot.benchmarkHistory.map(\.report)
             .sorted(by: { $0.generatedAt > $1.generatedAt })
         benchmarkReport = snapshot.latestBenchmark?.report ?? benchmarkHistory.first
+
+        if let profile = activeProfile {
+            syncDrafts(with: profile)
+        } else {
+            clearDrafts()
+        }
 
         persistenceStatus = "Loaded \(Self.timeFormatter.string(from: snapshot.savedAt))"
     }
@@ -579,6 +688,18 @@ final class BranchMotionDirector: ObservableObject {
             try? await Task.sleep(nanoseconds: 360_000_000)
             _ = try? MotionStorage.save(snapshot: snapshot, to: targetURL)
         }
+    }
+
+    private func syncDrafts(with profile: MotionProfile) {
+        profileDraftName = profile.name
+        profileDraftNotes = profile.notes
+        profileDraftTags = profile.tagCSV
+    }
+
+    private func clearDrafts() {
+        profileDraftName = ""
+        profileDraftNotes = ""
+        profileDraftTags = ""
     }
 
     private func mutateRun(_ body: (inout InFlightRun) -> Void) {

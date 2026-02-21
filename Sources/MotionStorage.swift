@@ -2,6 +2,7 @@ import Foundation
 
 enum MotionStorageError: Error {
     case snapshotNotFound(URL)
+    case desktopExportNotFound(URL)
 }
 
 enum MotionStorage {
@@ -11,6 +12,11 @@ enum MotionStorage {
         return base
             .appendingPathComponent("liquid-frames", isDirectory: true)
             .appendingPathComponent("motion-workspace.json", isDirectory: false)
+    }
+
+    static func desktopDirectoryURL(fileManager: FileManager = .default) -> URL {
+        fileManager.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser
     }
 
     static func save(
@@ -37,13 +43,60 @@ enum MotionStorage {
         return try decoder.decode(MotionWorkspaceSnapshot.self, from: data)
     }
 
+    static func save(
+        text: String,
+        to url: URL,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        try ensureParentDirectoryExists(for: url, fileManager: fileManager)
+        try Data(text.utf8).write(to: url, options: [.atomic])
+        return url
+    }
+
     static func desktopExportURL(date: Date = Date(), fileManager: FileManager = .default) -> URL {
-        let desktop = fileManager.urls(for: .desktopDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser
+        let desktop = desktopDirectoryURL(fileManager: fileManager)
         return desktop.appendingPathComponent(
             "liquid-frames-motion-\(Self.timestampFormatter.string(from: date)).json",
             isDirectory: false
         )
+    }
+
+    static func desktopReleaseGateURL(date: Date = Date(), fileManager: FileManager = .default) -> URL {
+        let desktop = desktopDirectoryURL(fileManager: fileManager)
+        return desktop.appendingPathComponent(
+            "liquid-frames-release-gate-\(Self.timestampFormatter.string(from: date)).md",
+            isDirectory: false
+        )
+    }
+
+    static func latestDesktopExportURL(fileManager: FileManager = .default) -> URL? {
+        let desktop = desktopDirectoryURL(fileManager: fileManager)
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: desktop,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        return entries
+            .filter { url in
+                url.pathExtension.lowercased() == "json" &&
+                    url.lastPathComponent.hasPrefix("liquid-frames-motion-")
+            }
+            .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+            .last
+    }
+
+    static func loadLatestDesktopExport(
+        fileManager: FileManager = .default
+    ) throws -> (url: URL, snapshot: MotionWorkspaceSnapshot) {
+        let desktop = desktopDirectoryURL(fileManager: fileManager)
+        guard let url = latestDesktopExportURL(fileManager: fileManager) else {
+            throw MotionStorageError.desktopExportNotFound(desktop)
+        }
+        let snapshot = try load(from: url, fileManager: fileManager)
+        return (url, snapshot)
     }
 
     private static func ensureParentDirectoryExists(for url: URL, fileManager: FileManager) throws {

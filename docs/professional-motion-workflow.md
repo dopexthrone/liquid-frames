@@ -23,7 +23,10 @@ Apply a preset first, then tune from there.
 3. Run `Run Benchmark` to generate deterministic scenario scores.
 4. Inspect latest run timing and recent-run consistency.
 5. Check benchmark delta versus prior benchmark run.
-6. Adjust one parameter group at a time:
+6. Watch live birth mechanics (`Neck %` and `Spit %`) to ensure inhale inflation precedes aperture opening and spit ejection.
+7. Confirm the parent recoil pattern: slight post-spit drop followed by settle recovery.
+8. Confirm visual semantics: children should emerge in a shared central lane, then bifurcate late during spit impulse.
+9. Adjust one parameter group at a time:
    - initiation feel: `gestureThreshold`, `pullDistance`
    - split feel: `splitStiffness`, `splitDamping`
    - settle feel: `settleStiffness`, `settleDamping`
@@ -44,7 +47,13 @@ Apply a preset first, then tune from there.
   - `Save`: force-write latest workspace state.
   - `Reload`: restore latest saved snapshot.
   - `Export JSON`: create timestamped snapshot for team review and build artifacts.
+- `Import Latest`: merge the newest desktop JSON export into the current workspace.
+- `Export Gate`: generate a markdown release-gate artifact for code review.
 - Include exported JSON in PRs when motion profiles or baselines are updated.
+- Keep profile metadata curated:
+  - `name`: environment + intent (`iMac-Prod`, `MacBook-Responsive`)
+  - `tags`: routing labels (`release`, `demo`, `latency`)
+  - `notes`: reviewer context, assumptions, and risks
 
 ## 6) Reliability Targets
 
@@ -58,6 +67,7 @@ Apply a preset first, then tune from there.
   - release branch should remain `PASS`
   - `WARNING` requires review
   - `FAIL` blocks motion-profile promotion
+- Release-gate markdown should avoid `BLOCKED` status before promotion.
 
 ## 7) Engineering Verification
 
@@ -77,3 +87,19 @@ Focus of test suite:
 - deterministic benchmark scoring
 - deterministic benchmark regression classification
 - snapshot persistence roundtrip
+- snapshot merge conflict resolution
+- release-gate report status classification
+
+## 8) Agent Reliability Gate
+
+Use this when integrating with autonomous systems or CI/CD pipelines:
+
+```bash
+swift run liquid-frames --agent check --pretty
+```
+
+- The command emits JSON with gate status, quality, benchmark grade, and policy failure reasons.
+- Exit code contract:
+  - `0`: pass
+  - `2`: policy failure
+  - `64`: usage/configuration error

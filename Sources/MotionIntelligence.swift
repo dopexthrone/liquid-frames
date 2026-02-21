@@ -252,10 +252,56 @@ struct MotionProfile: Identifiable, Equatable {
     let id: UUID
     var name: String
     var notes: String
+    var tags: [String]
     var tuning: MotionTuning
     var baseline: MotionBenchmarkBaseline?
     var createdAt: Date
     var updatedAt: Date
+
+    static func normalizedName(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Untitled Profile" : trimmed
+    }
+
+    static func normalizedNotes(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func normalizedTags(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var output: [String] = []
+
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let dedupeKey = trimmed.lowercased()
+            guard seen.insert(dedupeKey).inserted else { continue }
+            output.append(trimmed)
+        }
+        return output
+    }
+
+    static func normalizedTagsCSV(_ value: String) -> [String] {
+        normalizedTags(value.split(separator: ",").map { String($0) })
+    }
+
+    var tagCSV: String {
+        tags.joined(separator: ", ")
+    }
+
+    func withNormalizedMetadata() -> MotionProfile {
+        var copy = self
+        copy.name = Self.normalizedName(copy.name)
+        copy.notes = Self.normalizedNotes(copy.notes)
+        copy.tags = Self.normalizedTags(copy.tags)
+        return copy
+    }
+
+    func metadataMatchesDraft(name: String, notes: String, tags: [String]) -> Bool {
+        self.name == Self.normalizedName(name) &&
+            self.notes == Self.normalizedNotes(notes) &&
+            self.tags == Self.normalizedTags(tags)
+    }
 }
 
 struct MotionWorkspaceSnapshot: Codable, Equatable {
@@ -394,31 +440,70 @@ struct MotionProfileRecord: Codable, Equatable {
     var id: String
     var name: String
     var notes: String
+    var tags: [String]
     var tuning: MotionTuningRecord
     var baseline: MotionBenchmarkBaseline?
     var createdAt: Date
     var updatedAt: Date
 
     init(profile: MotionProfile) {
-        id = profile.id.uuidString
-        name = profile.name
-        notes = profile.notes
-        tuning = MotionTuningRecord(tuning: profile.tuning)
-        baseline = profile.baseline
-        createdAt = profile.createdAt
-        updatedAt = profile.updatedAt
+        let normalized = profile.withNormalizedMetadata()
+        id = normalized.id.uuidString
+        name = normalized.name
+        notes = normalized.notes
+        tags = normalized.tags
+        tuning = MotionTuningRecord(tuning: normalized.tuning)
+        baseline = normalized.baseline
+        createdAt = normalized.createdAt
+        updatedAt = normalized.updatedAt
     }
 
     var profile: MotionProfile {
         MotionProfile(
             id: UUID(uuidString: id) ?? UUID(),
-            name: name,
-            notes: notes,
+            name: MotionProfile.normalizedName(name),
+            notes: MotionProfile.normalizedNotes(notes),
+            tags: MotionProfile.normalizedTags(tags),
             tuning: tuning.tuning,
             baseline: baseline,
             createdAt: createdAt,
             updatedAt: updatedAt
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case notes
+        case tags
+        case tuning
+        case baseline
+        case createdAt
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Imported"
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        tuning = try container.decode(MotionTuningRecord.self, forKey: .tuning)
+        baseline = try container.decodeIfPresent(MotionBenchmarkBaseline.self, forKey: .baseline)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(tags, forKey: .tags)
+        try container.encode(tuning, forKey: .tuning)
+        try container.encode(baseline, forKey: .baseline)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
     }
 }
 
@@ -649,6 +734,299 @@ enum MotionBenchmarkRegressionEvaluator {
     }
 }
 
+enum MotionWorkspaceMerger {
+    static func merge(
+        current: MotionWorkspaceSnapshot,
+        incoming: MotionWorkspaceSnapshot
+    ) -> MotionWorkspaceSnapshot {
+        let authority = incoming.savedAt >= current.savedAt ? incoming : current
+        let mergedProfiles = mergeProfiles(current: current.profiles, incoming: incoming.profiles)
+        let mergedRuns = mergeRuns(current: current.runHistory, incoming: incoming.runHistory)
+        let mergedBenchmarks = mergeBenchmarks(
+            current: current.benchmarkHistory,
+            incoming: incoming.benchmarkHistory
+        )
+        let latestBenchmark = [incoming.latestBenchmark, current.latestBenchmark, mergedBenchmarks.first]
+            .compactMap { $0 }
+            .max(by: { $0.generatedAt < $1.generatedAt })
+        let activeProfileID = resolveActiveProfileID(
+            candidates: [
+                incoming.activeProfileID,
+                authority.activeProfileID,
+                current.activeProfileID
+            ],
+            mergedProfiles: mergedProfiles
+        )
+
+        return MotionWorkspaceSnapshot(
+            schemaVersion: max(2, max(current.schemaVersion, incoming.schemaVersion)),
+            selectedPresetRawValue: authority.selectedPresetRawValue,
+            autoAdaptEnabled: authority.autoAdaptEnabled,
+            tuning: authority.tuning,
+            runHistory: mergedRuns,
+            profiles: mergedProfiles,
+            activeProfileID: activeProfileID,
+            benchmarkHistory: mergedBenchmarks,
+            latestBenchmark: latestBenchmark,
+            savedAt: max(current.savedAt, incoming.savedAt)
+        )
+    }
+
+    private static func mergeProfiles(
+        current: [MotionProfileRecord],
+        incoming: [MotionProfileRecord]
+    ) -> [MotionProfileRecord] {
+        var merged: [String: MotionProfileRecord] = [:]
+
+        func upsert(_ record: MotionProfileRecord, preferCurrent: Bool) {
+            let normalized = MotionProfileRecord(profile: record.profile.withNormalizedMetadata())
+            if let existing = merged[normalized.id] {
+                if normalized.updatedAt > existing.updatedAt {
+                    merged[normalized.id] = normalized
+                } else if normalized.updatedAt == existing.updatedAt, !preferCurrent {
+                    merged[normalized.id] = normalized
+                }
+            } else {
+                merged[normalized.id] = normalized
+            }
+        }
+
+        for record in current {
+            upsert(record, preferCurrent: true)
+        }
+        for record in incoming {
+            upsert(record, preferCurrent: false)
+        }
+
+        return merged.values.sorted {
+            if $0.updatedAt == $1.updatedAt {
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            return $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    private static func mergeRuns(
+        current: [MotionRunRecord],
+        incoming: [MotionRunRecord]
+    ) -> [MotionRunRecord] {
+        var seen = Set<String>()
+        var merged: [MotionRunRecord] = []
+        for run in (current + incoming).sorted(by: { $0.timestamp > $1.timestamp }) {
+            let key = runKey(run)
+            guard seen.insert(key).inserted else { continue }
+            merged.append(run)
+            if merged.count == 40 {
+                break
+            }
+        }
+        return merged
+    }
+
+    private static func mergeBenchmarks(
+        current: [MotionBenchmarkRecord],
+        incoming: [MotionBenchmarkRecord]
+    ) -> [MotionBenchmarkRecord] {
+        var seen = Set<String>()
+        var merged: [MotionBenchmarkRecord] = []
+        for benchmark in (current + incoming).sorted(by: { $0.generatedAt > $1.generatedAt }) {
+            let key = benchmarkKey(benchmark)
+            guard seen.insert(key).inserted else { continue }
+            merged.append(benchmark)
+            if merged.count == 24 {
+                break
+            }
+        }
+        return merged
+    }
+
+    private static func resolveActiveProfileID(
+        candidates: [String?],
+        mergedProfiles: [MotionProfileRecord]
+    ) -> String? {
+        let ids = Set(mergedProfiles.map(\.id))
+        for candidate in candidates {
+            if let candidate, ids.contains(candidate) {
+                return candidate
+            }
+        }
+        return mergedProfiles.first?.id
+    }
+
+    private static func runKey(_ run: MotionRunRecord) -> String {
+        "\(run.timestamp.timeIntervalSince1970)-\(run.triggerRawValue)-\(quantized(run.prepPeak))-\(quantized(run.velocityPeak))-\(quantized(run.biasPeak))-\(quantized(run.preSplit))-\(quantized(run.preSettle))-\(quantized(run.settleTail))"
+    }
+
+    private static func benchmarkKey(_ benchmark: MotionBenchmarkRecord) -> String {
+        "\(benchmark.generatedAt.timeIntervalSince1970)-\(quantized(benchmark.overallScore))-\(quantized(benchmark.consistencyScore))-\(benchmark.gradeRawValue)"
+    }
+
+    private static func quantized(_ value: Double) -> Int {
+        Int((value * 1000).rounded())
+    }
+}
+
+enum MotionReleaseGateStatus: String {
+    case ready = "READY"
+    case attention = "ATTENTION"
+    case blocked = "BLOCKED"
+}
+
+struct MotionReleaseGateReport: Equatable {
+    let generatedAt: Date
+    let workspacePath: String
+    let profile: MotionProfile
+    let profileIsDirty: Bool
+    let quality: MotionQualityReport
+    let benchmark: MotionBenchmarkReport?
+    let regression: MotionBenchmarkRegression?
+    let latestRun: MotionRunMetrics?
+    let runCount: Int
+    let benchmarkHistoryCount: Int
+
+    var status: MotionReleaseGateStatus {
+        if profileIsDirty { return .blocked }
+        if quality.level == .unstable { return .blocked }
+        if let benchmark, benchmark.grade == .c || benchmark.grade == .d { return .blocked }
+        if regression?.status == .fail { return .blocked }
+
+        if quality.level == .caution { return .attention }
+        if benchmark == nil { return .attention }
+        if regression == nil || regression?.status == .warning { return .attention }
+        if runCount < 5 { return .attention }
+        return .ready
+    }
+
+    var findings: [String] {
+        var output: [String] = []
+
+        if profileIsDirty {
+            output.append("Active profile has unsaved edits.")
+        }
+
+        switch quality.level {
+        case .healthy:
+            break
+        case .caution:
+            output.append("Quality evaluator is in CAUTION.")
+        case .unstable:
+            output.append("Quality evaluator is UNSTABLE.")
+        }
+
+        if let benchmark {
+            if benchmark.grade == .c || benchmark.grade == .d {
+                output.append("Benchmark grade \(benchmark.grade.rawValue) is below release target.")
+            }
+        } else {
+            output.append("No benchmark report is available.")
+        }
+
+        if let regression {
+            switch regression.status {
+            case .pass:
+                break
+            case .warning:
+                output.append("Regression gate is WARNING.")
+            case .fail:
+                output.append("Regression gate is FAIL.")
+            }
+        } else {
+            output.append("No baseline regression check is available.")
+        }
+
+        if runCount < 5 {
+            output.append("Run sample size is low (\(runCount)); recommend at least 5 runs.")
+        }
+
+        return output
+    }
+
+    var markdown: String {
+        var lines: [String] = []
+        lines.append("# liquid-frames Release Gate")
+        lines.append("")
+        lines.append("- Generated At: \(Self.isoString(from: generatedAt))")
+        lines.append("- Workspace: `\(workspacePath)`")
+        lines.append("- Active Profile: \(profile.name)")
+        lines.append("- Profile Tags: \(profile.tags.isEmpty ? "none" : profile.tags.joined(separator: ", "))")
+        lines.append("")
+        lines.append("## Gate Status")
+        lines.append("")
+        lines.append("**\(status.rawValue)**")
+        lines.append("")
+        lines.append("## Findings")
+        lines.append("")
+
+        if findings.isEmpty {
+            lines.append("- No blockers or warnings detected.")
+        } else {
+            for finding in findings {
+                lines.append("- \(finding)")
+            }
+        }
+
+        lines.append("")
+        lines.append("## Quality")
+        lines.append("")
+        lines.append("- Level: \(quality.level.rawValue.uppercased())")
+        for message in quality.messages {
+            lines.append("- \(message)")
+        }
+
+        lines.append("")
+        lines.append("## Benchmark")
+        lines.append("")
+        if let benchmark {
+            lines.append("- Grade: \(benchmark.grade.rawValue)")
+            lines.append("- Overall Score: \(Self.number(benchmark.overallScore, digits: 1))")
+            lines.append("- Consistency Score: \(Self.number(benchmark.consistencyScore, digits: 1))")
+            lines.append("- Scenarios:")
+            for scenario in benchmark.scenarios {
+                lines.append("  - \(scenario.scenarioName): \(Self.number(scenario.score, digits: 1))")
+            }
+        } else {
+            lines.append("- Not available")
+        }
+
+        lines.append("")
+        lines.append("## Regression")
+        lines.append("")
+        if let regression {
+            lines.append("- Status: \(regression.status.rawValue.uppercased())")
+            lines.append("- Δ Overall: \(Self.number(regression.overallDelta, digits: 1))")
+            lines.append("- Δ Consistency: \(Self.number(regression.consistencyDelta, digits: 1))")
+            lines.append("- Worst Scenario Δ: \(Self.number(regression.worstScenarioDelta, digits: 1))")
+            for message in regression.messages {
+                lines.append("- \(message)")
+            }
+        } else {
+            lines.append("- Not available")
+        }
+
+        lines.append("")
+        lines.append("## Recent Activity")
+        lines.append("")
+        lines.append("- Run Count: \(runCount)")
+        lines.append("- Benchmark History Count: \(benchmarkHistoryCount)")
+        if let latestRun {
+            lines.append("- Latest Run Trigger: \(latestRun.trigger.rawValue)")
+            lines.append("- Latest Run Duration: \(Self.number(latestRun.totalDuration, digits: 2))s")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func isoString(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private static func number(_ value: Double, digits: Int) -> String {
+        String(format: "%.\(digits)f", value)
+    }
+}
+
 enum MotionBenchmarkEngine {
     static func runSuite(tuning: MotionTuning) -> MotionBenchmarkReport {
         let normalized = tuning.normalized()
@@ -816,6 +1194,194 @@ enum GestureSignalEstimator {
             bias: bias,
             energy: energy
         )
+    }
+}
+
+struct BirthDynamicsState: Equatable {
+    let envelope: CGFloat
+    let neckConstriction: CGFloat
+    let membraneStretch: CGFloat
+    let fluidTransfer: CGFloat
+    let torsion: CGFloat
+    let pulse: CGFloat
+    let sheathThickness: CGFloat
+    let inhale: CGFloat
+    let exhale: CGFloat
+    let aperture: CGFloat
+    let spitStrength: CGFloat
+}
+
+struct SpawnCascadePhases: Equatable {
+    let leftBranch: CGFloat
+    let rightBranch: CGFloat
+    let leftLeaves: [CGFloat]
+    let rightLeaves: [CGFloat]
+
+    var chainCoverage: CGFloat {
+        let leftMax = leftLeaves.max() ?? 0
+        let rightMax = rightLeaves.max() ?? 0
+        return Swift.max(Swift.max(leftBranch, rightBranch), Swift.max(leftMax, rightMax))
+    }
+}
+
+enum SpawnCascadePhaser {
+    static func sample(
+        progress: CGFloat,
+        leftLeafCount: Int,
+        rightLeafCount: Int
+    ) -> SpawnCascadePhases {
+        let t = clamped01(progress)
+
+        let leftBranch = staged(t, start: 0.02, duration: 0.4)
+        let rightBranch = staged(t, start: 0.28, duration: 0.4)
+        let leftLeaves = stagedSequence(
+            t,
+            count: max(0, leftLeafCount),
+            start: 0.16,
+            step: 0.11,
+            duration: 0.28
+        )
+        let rightLeaves = stagedSequence(
+            t,
+            count: max(0, rightLeafCount),
+            start: 0.44,
+            step: 0.11,
+            duration: 0.28
+        )
+
+        return SpawnCascadePhases(
+            leftBranch: leftBranch,
+            rightBranch: rightBranch,
+            leftLeaves: leftLeaves,
+            rightLeaves: rightLeaves
+        )
+    }
+
+    private static func stagedSequence(
+        _ progress: CGFloat,
+        count: Int,
+        start: CGFloat,
+        step: CGFloat,
+        duration: CGFloat
+    ) -> [CGFloat] {
+        guard count > 0 else { return [] }
+        return (0..<count).map { index in
+            staged(progress, start: start + (CGFloat(index) * step), duration: duration)
+        }
+    }
+
+    private static func staged(
+        _ progress: CGFloat,
+        start: CGFloat,
+        duration: CGFloat
+    ) -> CGFloat {
+        guard duration > 0 else { return progress >= start ? 1 : 0 }
+        let normalized = clamped01((progress - start) / duration)
+        // cubic easing for organic, non-linear reveal.
+        return normalized * normalized * (3 - (2 * normalized))
+    }
+
+    private static func clamped01(_ value: CGFloat) -> CGFloat {
+        Swift.max(0, Swift.min(1, value))
+    }
+}
+
+enum BirthDynamicsEngine {
+    static func sample(
+        prepProgress: CGFloat,
+        splitProgress: CGFloat,
+        settleProgress: CGFloat,
+        velocity: CGFloat,
+        energy: CGFloat,
+        bias: CGFloat
+    ) -> BirthDynamicsState {
+        let prep = clamped01(prepProgress)
+        let split = clamped01(splitProgress)
+        let settle = clamped01(settleProgress)
+        let speed = clamped01(velocity)
+        let power = clamped01(energy)
+        let signedBias = clampedSigned(bias)
+
+        let prepCurve = 1 - pow(1 - prep, 2.25)
+        let splitCurve = smootherStep(split)
+        let settleCurve = smootherStep(settle)
+        let envelope = clamped01((prepCurve * 0.24) + (splitCurve * 0.76))
+
+        // Breath cycle: prep is inhale pressure, split is exhale/ejection.
+        let inhale = clamped01(
+            (prepCurve * (1 - splitCurve)) * (1 - (settleCurve * 0.25))
+        )
+        let exhale = clamped01(
+            (splitCurve * (1 - (settleCurve * 0.48))) + (speed * 0.12)
+        )
+
+        let pulseCarrier = max(0, splitCurve - (settleCurve * 0.32))
+        let pulseDamping = CGFloat(exp(-Double(settleCurve) * 2.9))
+        let pulsePhase = Double(splitCurve) * .pi * (2.1 + Double(speed))
+        let pulse = CGFloat(sin(pulsePhase)) * pulseDamping * (0.34 + (power * 0.36))
+
+        let throatPressure = clamped01((inhale * 0.6) + (exhale * 0.7) + (abs(pulse) * 0.18))
+        let neckConstriction = clamped01(throatPressure - (settleCurve * 0.44))
+
+        let membraneStretch = clamped01(
+            (splitCurve * (0.64 + (power * 0.34))) +
+                (prepCurve * 0.2) -
+                (settleCurve * 0.27)
+        )
+
+        let fluidTransfer = clamped01(
+            (splitCurve * (0.42 + (power * 0.44))) +
+                (pulseCarrier * 0.24) -
+                (settleCurve * 0.22)
+        )
+
+        let torsion = clampedSigned(
+            (signedBias * (0.54 + (speed * 0.25))) +
+                (pulse * 0.34)
+        )
+
+        let sheathThickness = clamped01(
+            0.24 + (fluidTransfer * 0.56) + (abs(pulse) * 0.2)
+        )
+
+        let aperture = clamped01(
+            0.2 +
+                (exhale * 0.68) -
+                (inhale * 0.42) +
+                (speed * 0.08) -
+                (settleCurve * 0.18)
+        )
+
+        let spitStrength = clamped01(
+            (exhale * (0.72 + (power * 0.28))) + (abs(pulse) * 0.18)
+        )
+
+        return BirthDynamicsState(
+            envelope: envelope,
+            neckConstriction: neckConstriction,
+            membraneStretch: membraneStretch,
+            fluidTransfer: fluidTransfer,
+            torsion: torsion,
+            pulse: pulse,
+            sheathThickness: sheathThickness,
+            inhale: inhale,
+            exhale: exhale,
+            aperture: aperture,
+            spitStrength: spitStrength
+        )
+    }
+
+    private static func smootherStep(_ value: CGFloat) -> CGFloat {
+        let t = clamped01(value)
+        return t * t * t * (t * (t * 6 - 15) + 10)
+    }
+
+    private static func clamped01(_ value: CGFloat) -> CGFloat {
+        Swift.max(0, Swift.min(1, value))
+    }
+
+    private static func clampedSigned(_ value: CGFloat) -> CGFloat {
+        Swift.max(-1, Swift.min(1, value))
     }
 }
 
